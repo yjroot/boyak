@@ -165,6 +165,24 @@ class BoyakInstance:
         self.attributes[name] = value
 
 
+class BoyakModule:
+    """보약 모듈 (네임스페이스)"""
+
+    def __init__(self, name: str, env: 'Environment'):
+        self.name = name
+        self.env = env
+
+    def __repr__(self):
+        return f"<모듈 {self.name}>"
+
+    def __getattr__(self, name: str) -> Any:
+        if name in ('name', 'env'):
+            return object.__getattribute__(self, name)
+        if self.env.exists(name):
+            return self.env.get(name)
+        raise AttributeError(f"모듈 '{self.name}'에 '{name}'이(가) 없습니다")
+
+
 class Interpreter:
     """보약 인터프리터"""
 
@@ -441,16 +459,94 @@ class Interpreter:
                 self.execute_block(node.finally_body)
 
     def execute_ImportStatement(self, node: ImportStatement) -> None:
-        # 간단한 내장 모듈만 지원
-        modules = {
+        """모듈 가져오기"""
+        # 내장 모듈
+        builtin_modules = {
             '수학': math,
             '무작위': random,
         }
-        if node.module_name in modules:
-            name = node.alias or node.module_name
-            self.current_env.define(name, modules[node.module_name])
+
+        if node.module_name in builtin_modules:
+            module = builtin_modules[node.module_name]
+            if node.items:
+                # from 수학 import 제곱근
+                for item in node.items:
+                    if hasattr(module, item):
+                        self.current_env.define(item, getattr(module, item))
+                    else:
+                        self.error(f"'{node.module_name}'에 '{item}'이(가) 없습니다", node.line)
+            else:
+                name = node.alias or node.module_name
+                self.current_env.define(name, module)
+            return
+
+        # 사용자 모듈 (.보약 파일)
+        module_env = self._load_module(node.module_name, node.line)
+
+        if node.items:
+            # from 모듈 import 항목들
+            for item in node.items:
+                if module_env.exists(item):
+                    self.current_env.define(item, module_env.get(item))
+                else:
+                    self.error(f"'{node.module_name}'에 '{item}'이(가) 없습니다", node.line)
         else:
-            self.error(f"알 수 없는 모듈: {node.module_name}")
+            # 전체 모듈 가져오기
+            name = node.alias or node.module_name
+            # 모듈을 네임스페이스 객체로 래핑
+            module_obj = BoyakModule(node.module_name, module_env)
+            self.current_env.define(name, module_obj)
+
+    def _load_module(self, module_name: str, line: int) -> Environment:
+        """모듈 파일 로드 및 실행"""
+        import os
+
+        # 이미 로드된 모듈 캐시 확인
+        if not hasattr(self, '_module_cache'):
+            self._module_cache = {}
+
+        if module_name in self._module_cache:
+            return self._module_cache[module_name]
+
+        # 모듈 파일 찾기
+        module_paths = [
+            f"{module_name}.보약",
+            os.path.join(self.module_search_path, f"{module_name}.보약") if hasattr(self, 'module_search_path') else None,
+        ]
+
+        module_file = None
+        for path in module_paths:
+            if path and os.path.exists(path):
+                module_file = path
+                break
+
+        if not module_file:
+            self.error(f"모듈을 찾을 수 없습니다: '{module_name}'", line)
+
+        # 모듈 파일 읽기 및 파싱
+        with open(module_file, 'r', encoding='utf-8') as f:
+            source = f.read()
+
+        program = parse(source)
+
+        # 새 환경에서 모듈 실행
+        module_env = Environment()
+        # 내장 함수 복사
+        for name, value in self.global_env.variables.items():
+            module_env.define(name, value)
+
+        prev_env = self.current_env
+        self.current_env = module_env
+
+        try:
+            self.execute_program(program)
+        finally:
+            self.current_env = prev_env
+
+        # 캐시에 저장
+        self._module_cache[module_name] = module_env
+
+        return module_env
 
     def execute_ClassDef(self, node: ClassDef) -> None:
         """클래스 정의 실행"""
@@ -822,10 +918,15 @@ class Interpreter:
 
 def run_file(filename: str):
     """파일 실행"""
+    import os
+
     with open(filename, 'r', encoding='utf-8') as f:
         source = f.read()
 
     interpreter = Interpreter()
+    # 실행 파일의 디렉토리를 모듈 검색 경로로 설정
+    interpreter.module_search_path = os.path.dirname(os.path.abspath(filename))
+
     try:
         interpreter.run(source)
     except BoyakError as e:

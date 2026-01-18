@@ -355,6 +355,10 @@ class Lexer:
 
             self.error(f"알 수 없는 문자: '{char}'")
 
+        # 파일 끝 처리: 마지막에 NEWLINE이 없으면 추가
+        if self.tokens and self.tokens[-1].type != TokenType.NEWLINE:
+            self.tokens.append(Token(TokenType.NEWLINE, '\n', self.line, self.column))
+
         # 파일 끝 들여쓰기 정리
         while len(self.indent_stack) > 1:
             self.indent_stack.pop()
@@ -570,6 +574,11 @@ class Lexer:
         if identifier in KEYWORDS:
             self.tokens.append(Token(KEYWORDS[identifier], identifier, self.line, start_col))
         else:
+            # 점(.) 뒤의 식별자에서는 "이/가" 조사만 분리 건너뜀
+            # "을/를", "은/는" 등은 분리해야 함 (예: 수학도구.원주율을 출력하라)
+            # "이/가"는 분리하지 않음 (예: 수학도구.사각형의넓이() - 넓이가 넓+이로 분리되면 안됨)
+            after_dot = self.tokens and self.tokens[-1].type == TokenType.DOT
+
             # 식별자 끝에 붙은 조사 분리
             # 예: "이름은" -> "이름" + "은"
             # 예: "나이가" -> "나이" + "가"
@@ -593,6 +602,12 @@ class Lexer:
                     suffix = identifier[-suffix_len:]
                     base = identifier[:-suffix_len]
 
+                    # 조사/어미 키워드는 base로 사용하지 않음
+                    # 예: "가로"를 "가"(주격조사) + "로"로 분리하지 않음
+                    particle_keywords = {'이', '가', '을', '를', '은', '는', '과', '와', '로', '으로', '의'}
+                    if base in particle_keywords:
+                        continue
+
                     # base가 키워드이면 항상 분리 (예: "틀을" -> "틀" + "을")
                     # base가 키워드가 아니고 너무 짧으면 분리하지 않음
                     # "이/가"는 단어 끝에 자주 오므로 base가 3자 이상일 때만 분리
@@ -603,8 +618,13 @@ class Lexer:
                         # 이/가는 한국어 단어 끝에 자주 나오므로 더 엄격하게
                         if suffix in ('이', '가') and len(base) < 3:
                             continue
+                        # 점(.) 뒤의 "이/가"는 분리하지 않음 (메서드명 보호)
+                        # 예: 수학도구.사각형의넓이 -> "넓이"가 "넓"+"이"로 분리되면 안됨
+                        if after_dot and suffix in ('이', '가'):
+                            continue
+                        # "은/는"은 1글자 base도 허용 (예: "키는", "수는")
                         # 다른 접미사는 base가 2자 이상이면 분리
-                        if len(base) < 2:
+                        if suffix not in ('은', '는') and len(base) < 2:
                             continue
 
                     if suffix in KEYWORDS:

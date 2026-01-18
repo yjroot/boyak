@@ -155,6 +155,23 @@ class Parser:
                 line=start_token.line
             )
 
+        # X에서 Y를 가져오라 (from X import Y)
+        if self.match(TokenType.FROM):  # 에서
+            self.advance()
+            items = [self.expect(TokenType.IDENTIFIER, "가져올 항목 이름이 필요합니다").value]
+            # 여러 항목: X에서 Y와 Z를 가져오라
+            while self.match(TokenType.WITH):  # 과/와
+                self.advance()
+                items.append(self.expect(TokenType.IDENTIFIER, "가져올 항목 이름이 필요합니다").value)
+            if self.match(TokenType.OBJECT):  # 를
+                self.advance()
+            self.expect(TokenType.IMPORT, "'가져오라'가 필요합니다")
+            return ImportStatement(
+                module_name=name,
+                items=items,
+                line=start_token.line
+            )
+
         # 값을 출력하라 패턴
         if self.match(TokenType.OBJECT):  # 을/를
             self.advance()
@@ -172,6 +189,23 @@ class Parser:
                 )
             if self.match(TokenType.DEFINE):  # 정의하자
                 return self.parse_function_def(name, start_token)
+            if self.match(TokenType.IMPORT):  # 가져오라
+                self.advance()
+                return ImportStatement(
+                    module_name=name,
+                    line=start_token.line
+                )
+            # X를 Y으로 가져오라 (import X as Y)
+            if self.match(TokenType.IDENTIFIER):
+                alias = self.advance().value
+                if self.match(TokenType.AS):  # 으로
+                    self.advance()
+                    self.expect(TokenType.IMPORT, "'가져오라'가 필요합니다")
+                    return ImportStatement(
+                        module_name=name,
+                        alias=alias,
+                        line=start_token.line
+                    )
 
         # 복합 할당: 변수 += 값
         if self.match(TokenType.PLUS_ASSIGN, TokenType.MINUS_ASSIGN,
@@ -229,12 +263,16 @@ class Parser:
         if self.match(TokenType.RANGE_START):  # 부터
             return self.parse_range_loop(num, start_token)
 
-        # 숫자를 출력하라
+        # 숫자를 출력하라 / 돌려주라
         if self.match(TokenType.OBJECT):
             self.advance()
             if self.match(TokenType.PRINT):
                 self.advance()
                 return PrintStatement(value=num, line=start_token.line)
+            if self.match(TokenType.RETURN):
+                self.advance()
+                return ReturnStatement(value=num, line=start_token.line)
+            self.pos -= 1  # 조사 위치로 복귀
 
         return ExpressionStatement(expression=num, line=start_token.line)
 

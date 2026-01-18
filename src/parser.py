@@ -112,6 +112,10 @@ class Parser:
         if self.match(TokenType.IDENTIFIER):
             return self.parse_identifier_statement()
 
+        # 자신의로 시작하는 문장 (메서드 내부)
+        if self.match(TokenType.SELF_ATTR):
+            return self.parse_self_statement()
+
         # 숫자로 시작하는 문장
         if self.match(TokenType.NUMBER):
             return self.parse_number_statement()
@@ -130,6 +134,14 @@ class Parser:
         """식별자로 시작하는 문장"""
         start_token = self.current()
         name = self.advance().value  # 식별자
+
+        # 클래스 정의: "사람 틀을 정의하자"
+        if self.match(TokenType.CLASS):  # 틀
+            self.advance()
+            if self.match(TokenType.OBJECT):  # 을
+                self.advance()
+                if self.match(TokenType.DEFINE):  # 정의하자
+                    return self.parse_class_def(name, start_token)
 
         # 변수명은 값이다 패턴
         if self.match(TokenType.TOPIC_MARKER):  # 은/는
@@ -225,6 +237,57 @@ class Parser:
                 return PrintStatement(value=num, line=start_token.line)
 
         return ExpressionStatement(expression=num, line=start_token.line)
+
+    def parse_self_statement(self) -> Statement:
+        """자신의로 시작하는 문장 (메서드 내부)"""
+        start_token = self.current()
+        self.advance()  # 자신의 소비
+
+        # 속성 이름
+        attr_token = self.expect(TokenType.IDENTIFIER, "속성 이름이 필요합니다")
+        attr_name = attr_token.value
+        self_access = SelfAccess(attribute=attr_name, line=start_token.line)
+
+        # 자신의 X는 Y이다 (속성 할당)
+        if self.match(TokenType.TOPIC_MARKER):
+            self.advance()
+            value = self.parse_expression()
+            if self.match(TokenType.IS):
+                self.advance()
+            return Assignment(
+                target=self_access,
+                value=value,
+                line=start_token.line
+            )
+
+        # 자신의 X를 출력하라 / 돌려주라
+        if self.match(TokenType.OBJECT):
+            self.advance()
+            if self.match(TokenType.PRINT):
+                self.advance()
+                return PrintStatement(value=self_access, line=start_token.line)
+            if self.match(TokenType.RETURN):
+                self.advance()
+                return ReturnStatement(value=self_access, line=start_token.line)
+            self.pos -= 1  # 조사 위치로 복귀
+
+        # 표현식 문장 (자신의 X + Y 등)
+        # 다른 연산이 있을 수 있으므로 표현식 파싱 계속
+        self.pos = start_token.pos if hasattr(start_token, 'pos') else self.pos - 2
+        expr = self.parse_expression()
+
+        # 표현식 뒤에 을/를 출력하라/돌려주라
+        if self.match(TokenType.OBJECT):
+            self.advance()
+            if self.match(TokenType.PRINT):
+                self.advance()
+                return PrintStatement(value=expr, line=start_token.line)
+            if self.match(TokenType.RETURN):
+                self.advance()
+                return ReturnStatement(value=expr, line=start_token.line)
+            self.pos -= 1
+
+        return ExpressionStatement(expression=expr, line=start_token.line)
 
     def parse_string_statement(self) -> Statement:
         """문자열로 시작하는 문장"""
@@ -383,7 +446,16 @@ class Parser:
                 expr = IndexAccess(target=expr, index=index)
 
             elif self.match(TokenType.DOT):
-                # 속성 접근
+                # 속성 접근 (점 표기)
+                self.advance()
+                if self.match(TokenType.IDENTIFIER):
+                    attr = self.advance().value
+                    expr = AttributeAccess(target=expr, attribute=attr)
+                else:
+                    self.error("속성 이름이 필요합니다")
+
+            elif self.match(TokenType.POSSESSIVE):
+                # 속성 접근 (소유격 '의')
                 self.advance()
                 if self.match(TokenType.IDENTIFIER):
                     attr = self.advance().value
@@ -442,6 +514,31 @@ class Parser:
         if self.match(TokenType.NONE):
             self.advance()
             return NoneLiteral(line=token.line)
+
+        # 자신의 (속성 접근)
+        if self.match(TokenType.SELF_ATTR):
+            self.advance()
+            attr_name = self.expect(TokenType.IDENTIFIER, "속성 이름이 필요합니다").value
+            return SelfAccess(attribute=attr_name, line=token.line)
+
+        # 자신 (자기 참조)
+        if self.match(TokenType.SELF):
+            self.advance()
+            return SelfReference(line=token.line)
+
+        # 부모의 (부모 클래스 접근)
+        if self.match(TokenType.PARENT):
+            self.advance()
+            method_name = self.expect(TokenType.IDENTIFIER, "메서드 이름이 필요합니다").value
+            args = []
+            if self.match(TokenType.LPAREN):
+                self.advance()
+                while not self.match(TokenType.RPAREN):
+                    args.append(self.parse_expression())
+                    if self.match(TokenType.COMMA):
+                        self.advance()
+                self.expect(TokenType.RPAREN, "')'가 필요합니다")
+            return ParentCall(method=method_name, arguments=args, line=token.line)
 
         # 식별자
         if self.match(TokenType.IDENTIFIER):
@@ -752,6 +849,266 @@ class Parser:
             except_clauses=except_clauses,
             finally_body=finally_body,
             line=token.line
+        )
+
+    def parse_class_def(self, name: str, start_token: Token) -> ClassDef:
+        """클래스(틀) 정의 파싱"""
+        self.advance()  # 정의하자
+
+        parents = []
+
+        # 상속 확인: "동물을 확장하여" 또는 "A와 B를 확장하여"
+        if self.match(TokenType.IDENTIFIER):
+            # 부모 클래스 이름들 수집
+            while self.match(TokenType.IDENTIFIER):
+                parent_name = self.advance().value
+                parents.append(parent_name)
+                if self.match(TokenType.WITH):  # 과/와
+                    self.advance()
+                elif self.match(TokenType.OBJECT):  # 을/를
+                    break
+
+            if self.match(TokenType.OBJECT):  # 을/를
+                self.advance()
+            if self.match(TokenType.EXTEND):  # 확장하여
+                self.advance()
+
+        self.skip_newlines()
+        self.expect(TokenType.INDENT, "들여쓰기가 필요합니다")
+
+        body = []
+        init_method = None
+        destroy_method = None
+
+        # 클래스 본문 파싱
+        while not self.match(TokenType.DEDENT, TokenType.EOF):
+            self.skip_newlines()
+
+            if self.match(TokenType.DEDENT, TokenType.EOF):
+                break
+
+            # 생성자: "생성할때"
+            if self.match(TokenType.INIT):
+                init_method = self.parse_init_method()
+                body.append(init_method)
+
+            # 소멸자: "소멸할때"
+            elif self.match(TokenType.DESTROY):
+                destroy_method = self.parse_destroy_method()
+                body.append(destroy_method)
+
+            # 데코레이터: @틀메서드 또는 @정적메서드
+            elif self.match(TokenType.AT):
+                method = self.parse_decorated_method()
+                if method:
+                    body.append(method)
+
+            # 일반 메서드: "메서드명을 정의하자"
+            elif self.match(TokenType.IDENTIFIER):
+                method = self.parse_method_def()
+                if method:
+                    body.append(method)
+
+            else:
+                # 클래스 속성 등 기타 문장
+                stmt = self.parse_statement()
+                if stmt:
+                    body.append(stmt)
+
+            self.skip_newlines()
+
+        if self.match(TokenType.DEDENT):
+            self.advance()
+
+        return ClassDef(
+            name=name,
+            parents=parents,
+            body=body,
+            init_method=init_method,
+            destroy_method=destroy_method,
+            line=start_token.line
+        )
+
+    def parse_init_method(self) -> InitMethod:
+        """생성자(생성할때) 파싱"""
+        token = self.advance()  # 생성할때
+
+        parameters = []
+
+        # 매개변수: "이름과 나이를 받아"
+        if self.match(TokenType.IDENTIFIER):
+            while self.match(TokenType.IDENTIFIER):
+                param = self.advance().value
+                parameters.append(param)
+                if self.match(TokenType.WITH):  # 과/와
+                    self.advance()
+                elif self.match(TokenType.OBJECT):  # 을/를
+                    break
+
+            if self.match(TokenType.OBJECT):
+                self.advance()
+            if self.match(TokenType.RECEIVE):  # 받아
+                self.advance()
+
+        self.skip_newlines()
+        self.expect(TokenType.INDENT, "들여쓰기가 필요합니다")
+        body = self.parse_class_body_block()
+
+        return InitMethod(parameters=parameters, body=body, line=token.line)
+
+    def parse_destroy_method(self) -> MethodDef:
+        """소멸자(소멸할때) 파싱"""
+        token = self.advance()  # 소멸할때
+
+        self.skip_newlines()
+        self.expect(TokenType.INDENT, "들여쓰기가 필요합니다")
+        body = self.parse_class_body_block()
+
+        return MethodDef(name="__del__", parameters=[], body=body, line=token.line)
+
+    def parse_method_def(self) -> Optional[MethodDef]:
+        """메서드 정의 파싱"""
+        start_token = self.current()
+        name = self.advance().value
+
+        # "메서드명을 정의하자"
+        if not self.match(TokenType.OBJECT):
+            self.pos -= 1
+            return None
+
+        self.advance()  # 을/를
+
+        if not self.match(TokenType.DEFINE):
+            self.pos -= 2
+            return None
+
+        self.advance()  # 정의하자
+
+        parameters = []
+
+        # 매개변수
+        if self.match(TokenType.IDENTIFIER):
+            while self.match(TokenType.IDENTIFIER):
+                param = self.advance().value
+                parameters.append(param)
+                if self.match(TokenType.WITH):
+                    self.advance()
+                elif self.match(TokenType.OBJECT):
+                    break
+
+            if self.match(TokenType.OBJECT):
+                self.advance()
+            if self.match(TokenType.RECEIVE):
+                self.advance()
+
+        self.skip_newlines()
+        self.expect(TokenType.INDENT, "들여쓰기가 필요합니다")
+        body = self.parse_class_body_block()
+
+        return MethodDef(
+            name=name,
+            parameters=parameters,
+            body=body,
+            line=start_token.line
+        )
+
+    def parse_decorated_method(self) -> Optional[MethodDef]:
+        """데코레이터가 있는 메서드 파싱"""
+        self.advance()  # @
+
+        is_class_method = False
+        is_static_method = False
+
+        if self.match(TokenType.CLASS_METHOD):  # 틀메서드
+            is_class_method = True
+            self.advance()
+        elif self.match(TokenType.STATIC_METHOD):  # 정적메서드
+            is_static_method = True
+            self.advance()
+
+        self.skip_newlines()
+
+        if not self.match(TokenType.IDENTIFIER):
+            return None
+
+        method = self.parse_method_def()
+        if method:
+            method.is_class_method = is_class_method
+            method.is_static_method = is_static_method
+
+        return method
+
+    def parse_class_body_block(self) -> List[Statement]:
+        """클래스 내부 블록 파싱 (자신의 처리 포함)"""
+        statements = []
+        self.skip_newlines()
+
+        while not self.match(TokenType.DEDENT, TokenType.EOF):
+            stmt = self.parse_class_statement()
+            if stmt:
+                statements.append(stmt)
+            self.skip_newlines()
+
+        if self.match(TokenType.DEDENT):
+            self.advance()
+
+        return statements
+
+    def parse_class_statement(self) -> Optional[Statement]:
+        """클래스 내부 문장 파싱"""
+        self.skip_newlines()
+
+        if self.match(TokenType.EOF, TokenType.DEDENT):
+            return None
+
+        token = self.current()
+
+        # 부모의 생성() 패턴
+        if self.match(TokenType.PARENT):  # 부모의
+            return self.parse_parent_call()
+
+        # 기타 문장 (자신의 포함 - parse_statement에서 처리)
+        return self.parse_statement()
+
+    def parse_self_assignment(self) -> Statement:
+        """자신의 속성 할당 파싱"""
+        start_token = self.advance()  # 자신의
+        attr_name = self.expect(TokenType.IDENTIFIER, "속성 이름이 필요합니다").value
+
+        if self.match(TokenType.TOPIC_MARKER):  # 은/는
+            self.advance()
+            value = self.parse_expression()
+            if self.match(TokenType.IS):  # 이다
+                self.advance()
+
+            return Assignment(
+                target=SelfAccess(attribute=attr_name, line=start_token.line),
+                value=value,
+                line=start_token.line
+            )
+
+        # 자신의 X를 출력하라 등의 경우
+        self.pos -= 2  # 되돌리기
+        expr = self.parse_expression()
+        return ExpressionStatement(expression=expr, line=start_token.line)
+
+    def parse_parent_call(self) -> Statement:
+        """부모 클래스 호출 파싱"""
+        start_token = self.advance()  # 부모의
+        method_name = self.expect(TokenType.IDENTIFIER, "메서드 이름이 필요합니다").value
+
+        args = []
+        if self.match(TokenType.LPAREN):
+            self.advance()
+            while not self.match(TokenType.RPAREN):
+                args.append(self.parse_expression())
+                if self.match(TokenType.COMMA):
+                    self.advance()
+            self.expect(TokenType.RPAREN, "')'가 필요합니다")
+
+        return ExpressionStatement(
+            expression=ParentCall(method=method_name, arguments=args, line=start_token.line),
+            line=start_token.line
         )
 
 

@@ -95,12 +95,84 @@ class BoyakFunction:
         return f"<함수 {self.name}>"
 
 
+class BoyakMethod:
+    """보약 메서드 (인스턴스에 바인딩된 함수)"""
+
+    def __init__(self, name: str, parameters: List[str],
+                 default_values: Dict[str, Any], body: List[Statement],
+                 instance: 'BoyakInstance', klass: 'BoyakClass'):
+        self.name = name
+        self.parameters = parameters
+        self.default_values = default_values
+        self.body = body
+        self.instance = instance
+        self.klass = klass
+
+    def __repr__(self):
+        return f"<메서드 {self.klass.name}.{self.name}>"
+
+
+class BoyakClass:
+    """보약 클래스"""
+
+    def __init__(self, name: str, parents: List['BoyakClass'],
+                 methods: Dict[str, 'MethodDef'],
+                 init_method: Optional['InitMethod'],
+                 class_attrs: Dict[str, Any],
+                 closure: Environment):
+        self.name = name
+        self.parents = parents
+        self.methods = methods
+        self.init_method = init_method
+        self.class_attrs = class_attrs
+        self.closure = closure
+
+    def __repr__(self):
+        return f"<틀 {self.name}>"
+
+    def get_method(self, name: str) -> Optional['MethodDef']:
+        """메서드 찾기 (상속 계층 탐색)"""
+        if name in self.methods:
+            return self.methods[name]
+        for parent in self.parents:
+            method = parent.get_method(name)
+            if method:
+                return method
+        return None
+
+
+class BoyakInstance:
+    """보약 인스턴스 (객체)"""
+
+    def __init__(self, klass: BoyakClass):
+        self.klass = klass
+        self.attributes: Dict[str, Any] = {}
+
+    def __repr__(self):
+        return f"<{self.klass.name} 객체>"
+
+    def get(self, name: str) -> Any:
+        """속성 가져오기"""
+        if name in self.attributes:
+            return self.attributes[name]
+        # 클래스 속성 확인
+        if name in self.klass.class_attrs:
+            return self.klass.class_attrs[name]
+        raise BoyakError(f"'{self.klass.name}' 객체에 '{name}' 속성이 없습니다")
+
+    def set(self, name: str, value: Any):
+        """속성 설정"""
+        self.attributes[name] = value
+
+
 class Interpreter:
     """보약 인터프리터"""
 
     def __init__(self):
         self.global_env = Environment()
         self.current_env = self.global_env
+        self.current_instance: Optional[BoyakInstance] = None  # 메서드 실행 시 현재 인스턴스
+        self.current_class: Optional[BoyakClass] = None  # 메서드 실행 시 현재 클래스
         self._setup_builtins()
 
     def _setup_builtins(self):
@@ -182,7 +254,15 @@ class Interpreter:
             target[index] = value
         elif isinstance(node.target, AttributeAccess):
             target = self.evaluate(node.target.target)
-            setattr(target, node.target.attribute, value)
+            if isinstance(target, BoyakInstance):
+                target.set(node.target.attribute, value)
+            else:
+                setattr(target, node.target.attribute, value)
+        elif isinstance(node.target, SelfAccess):
+            # 자신의 X = 값
+            if self.current_instance is None:
+                self.error("'자신의'는 메서드 내부에서만 사용할 수 있습니다", node.line)
+            self.current_instance.set(node.target.attribute, value)
 
     def execute_CompoundAssignment(self, node: CompoundAssignment) -> None:
         current = self.current_env.get(node.target.name)
@@ -372,6 +452,52 @@ class Interpreter:
         else:
             self.error(f"알 수 없는 모듈: {node.module_name}")
 
+    def execute_ClassDef(self, node: ClassDef) -> None:
+        """클래스 정의 실행"""
+        # 부모 클래스 가져오기
+        parents = []
+        for parent_name in node.parents:
+            parent = self.current_env.get(parent_name)
+            if not isinstance(parent, BoyakClass):
+                self.error(f"'{parent_name}'은(는) 클래스가 아닙니다", node.line)
+            parents.append(parent)
+
+        # 메서드와 클래스 속성 수집
+        methods = {}
+        class_attrs = {}
+        init_method = None
+
+        for stmt in node.body:
+            if isinstance(stmt, MethodDef):
+                methods[stmt.name] = stmt
+            elif isinstance(stmt, InitMethod):
+                init_method = stmt
+            elif isinstance(stmt, Assignment):
+                # 클래스 속성
+                if isinstance(stmt.target, Identifier):
+                    class_attrs[stmt.target.name] = self.evaluate(stmt.value)
+
+        # 클래스 객체 생성
+        klass = BoyakClass(
+            name=node.name,
+            parents=parents,
+            methods=methods,
+            init_method=init_method,
+            class_attrs=class_attrs,
+            closure=self.current_env
+        )
+
+        # 환경에 클래스 등록
+        self.current_env.define(node.name, klass)
+
+    def execute_MethodDef(self, node: MethodDef) -> None:
+        """메서드 정의는 ClassDef에서 처리됨"""
+        pass
+
+    def execute_InitMethod(self, node: InitMethod) -> None:
+        """생성자 정의는 ClassDef에서 처리됨"""
+        pass
+
     def execute_block(self, statements: List[Statement]) -> Any:
         """블록 실행"""
         result = None
@@ -446,12 +572,60 @@ class Interpreter:
 
     def evaluate_AttributeAccess(self, node: AttributeAccess) -> Any:
         target = self.evaluate(node.target)
+
+        # BoyakInstance 속성 접근
+        if isinstance(target, BoyakInstance):
+            # 먼저 속성 확인
+            if node.attribute in target.attributes:
+                return target.attributes[node.attribute]
+            # 메서드 확인
+            method_def = target.klass.get_method(node.attribute)
+            if method_def:
+                return BoyakMethod(
+                    name=method_def.name,
+                    parameters=method_def.parameters,
+                    default_values=method_def.default_values,
+                    body=method_def.body,
+                    instance=target,
+                    klass=target.klass
+                )
+            # 클래스 속성 확인
+            if node.attribute in target.klass.class_attrs:
+                return target.klass.class_attrs[node.attribute]
+            self.error(f"'{target.klass.name}' 객체에 '{node.attribute}' 속성이 없습니다")
+
+        # BoyakClass 속성 접근 (클래스 메서드/정적 메서드)
+        if isinstance(target, BoyakClass):
+            if node.attribute in target.class_attrs:
+                return target.class_attrs[node.attribute]
+            method_def = target.get_method(node.attribute)
+            if method_def:
+                if method_def.is_static_method:
+                    # 정적 메서드는 인스턴스 없이 호출
+                    return BoyakMethod(
+                        name=method_def.name,
+                        parameters=method_def.parameters,
+                        default_values=method_def.default_values,
+                        body=method_def.body,
+                        instance=None,
+                        klass=target
+                    )
+            self.error(f"'{target.name}' 클래스에 '{node.attribute}' 속성이 없습니다")
+
         return getattr(target, node.attribute)
 
     def evaluate_FunctionCall(self, node: FunctionCall) -> Any:
         function = self.evaluate(node.function)
         args = [self.evaluate(arg) for arg in node.arguments]
         kwargs = {k: self.evaluate(v) for k, v in node.keyword_args.items()}
+
+        # 클래스 인스턴스 생성
+        if isinstance(function, BoyakClass):
+            return self._instantiate_class(function, args, kwargs)
+
+        # 메서드 호출
+        if isinstance(function, BoyakMethod):
+            return self._call_method(function, args, kwargs)
 
         # 내장 함수
         if callable(function) and not isinstance(function, BoyakFunction):
@@ -491,6 +665,135 @@ class Interpreter:
             return e.value
         finally:
             self.current_env = prev_env
+
+    def _instantiate_class(self, klass: BoyakClass, args: List[Any],
+                           kwargs: Dict[str, Any]) -> BoyakInstance:
+        """클래스 인스턴스 생성"""
+        instance = BoyakInstance(klass)
+
+        # 생성자 호출
+        if klass.init_method:
+            self._call_init(klass, instance, klass.init_method, args, kwargs)
+        elif args or kwargs:
+            self.error(f"'{klass.name}' 클래스에는 생성자가 없습니다")
+
+        return instance
+
+    def _call_init(self, klass: BoyakClass, instance: BoyakInstance,
+                   init_method: 'InitMethod', args: List[Any],
+                   kwargs: Dict[str, Any]) -> None:
+        """생성자 호출"""
+        # 새 환경 생성
+        env = Environment(klass.closure)
+
+        # 매개변수 바인딩
+        for i, param in enumerate(init_method.parameters):
+            if i < len(args):
+                env.define(param, args[i])
+            elif param in kwargs:
+                env.define(param, kwargs[param])
+            else:
+                self.error(f"생성자의 필수 매개변수 '{param}'가 없습니다")
+
+        # 환경 및 인스턴스 설정
+        prev_env = self.current_env
+        prev_instance = self.current_instance
+        prev_class = self.current_class
+
+        self.current_env = env
+        self.current_instance = instance
+        self.current_class = klass
+
+        try:
+            self.execute_block(init_method.body)
+        except ReturnException:
+            pass  # 생성자에서 return은 무시
+        finally:
+            self.current_env = prev_env
+            self.current_instance = prev_instance
+            self.current_class = prev_class
+
+    def _call_method(self, method: BoyakMethod, args: List[Any],
+                     kwargs: Dict[str, Any]) -> Any:
+        """메서드 호출"""
+        # 정적 메서드는 인스턴스 없이 실행
+        if method.instance is None:
+            env = Environment(method.klass.closure)
+        else:
+            env = Environment(method.klass.closure)
+
+        # 매개변수 바인딩
+        for i, param in enumerate(method.parameters):
+            if i < len(args):
+                env.define(param, args[i])
+            elif param in kwargs:
+                env.define(param, kwargs[param])
+            elif param in method.default_values:
+                env.define(param, method.default_values[param])
+            else:
+                self.error(f"메서드의 필수 매개변수 '{param}'가 없습니다")
+
+        # 환경 및 인스턴스 설정
+        prev_env = self.current_env
+        prev_instance = self.current_instance
+        prev_class = self.current_class
+
+        self.current_env = env
+        self.current_instance = method.instance
+        self.current_class = method.klass
+
+        try:
+            self.execute_block(method.body)
+            return None
+        except ReturnException as e:
+            return e.value
+        finally:
+            self.current_env = prev_env
+            self.current_instance = prev_instance
+            self.current_class = prev_class
+
+    def evaluate_SelfAccess(self, node: SelfAccess) -> Any:
+        """자신의 X 평가"""
+        if self.current_instance is None:
+            self.error("'자신의'는 메서드 내부에서만 사용할 수 있습니다", node.line)
+        return self.current_instance.get(node.attribute)
+
+    def evaluate_SelfReference(self, node: SelfReference) -> BoyakInstance:
+        """자신 평가"""
+        if self.current_instance is None:
+            self.error("'자신'은 메서드 내부에서만 사용할 수 있습니다", node.line)
+        return self.current_instance
+
+    def evaluate_ParentCall(self, node: ParentCall) -> Any:
+        """부모의 메서드() 평가"""
+        if self.current_instance is None or self.current_class is None:
+            self.error("'부모의'는 메서드 내부에서만 사용할 수 있습니다", node.line)
+
+        # 부모 클래스에서 메서드 찾기
+        for parent in self.current_class.parents:
+            method_def = parent.get_method(node.method)
+            if method_def:
+                # 부모 메서드를 현재 인스턴스에서 호출
+                method = BoyakMethod(
+                    name=method_def.name,
+                    parameters=method_def.parameters,
+                    default_values=method_def.default_values,
+                    body=method_def.body,
+                    instance=self.current_instance,
+                    klass=parent
+                )
+                args = [self.evaluate(arg) for arg in node.arguments]
+                return self._call_method(method, args, {})
+
+        # 특수 케이스: 부모의 생성자 호출
+        if node.method == '생성':
+            for parent in self.current_class.parents:
+                if parent.init_method:
+                    args = [self.evaluate(arg) for arg in node.arguments]
+                    self._call_init(parent, self.current_instance, parent.init_method, args, {})
+                    return None
+
+        self.error(f"부모 클래스에 '{node.method}' 메서드가 없습니다", node.line)
 
     def evaluate_InterpolatedString(self, node: InterpolatedString) -> str:
         """문자열 보간 평가"""

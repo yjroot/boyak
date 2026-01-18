@@ -319,3 +319,52 @@ class ListRemove(Statement):
 class PassStatement(Statement):
     """아무것도 하지 않음"""
     pass
+
+
+# ============ 클래스 관련 ============
+
+@dataclass
+class ClassDef(Statement):
+    """클래스 정의 (틀 정의)"""
+    name: str = ""
+    parents: List[str] = field(default_factory=list)  # 상속받는 클래스들
+    body: List[Statement] = field(default_factory=list)
+    init_method: Optional['MethodDef'] = None
+    destroy_method: Optional['MethodDef'] = None
+
+
+@dataclass
+class MethodDef(Statement):
+    """메서드 정의"""
+    name: str = ""
+    parameters: List[str] = field(default_factory=list)
+    default_values: dict = field(default_factory=dict)
+    body: List[Statement] = field(default_factory=list)
+    is_class_method: bool = False
+    is_static_method: bool = False
+
+
+@dataclass
+class InitMethod(Statement):
+    """생성자 (생성할때)"""
+    parameters: List[str] = field(default_factory=list)
+    body: List[Statement] = field(default_factory=list)
+
+
+@dataclass
+class SelfAccess(Expression):
+    """자기 참조 속성 접근 (자신의 X)"""
+    attribute: str = ""
+
+
+@dataclass
+class SelfReference(Expression):
+    """자기 참조 (자신)"""
+    pass
+
+
+@dataclass
+class ParentCall(Expression):
+    """부모 클래스 메서드 호출 (부모의 메서드())"""
+    method: str = ""
+    arguments: List[Expression] = field(default_factory=list)

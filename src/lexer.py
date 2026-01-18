@@ -80,6 +80,7 @@ class TokenType(Enum):
     OBJECT = auto()          # 을/를
     WITH = auto()            # 과/와
     TO = auto()              # (으)로
+    POSSESSIVE = auto()      # 의 (소유격/속성 접근)
 
     # 예외 처리
     TRY = auto()             # 시도하자
@@ -89,6 +90,18 @@ class TokenType(Enum):
 
     # 모듈
     IMPORT = auto()          # 가져오라
+
+    # 클래스
+    CLASS = auto()           # 틀
+    INIT = auto()            # 생성할때
+    DESTROY = auto()         # 소멸할때
+    SELF = auto()            # 자신
+    SELF_ATTR = auto()       # 자신의
+    EXTEND = auto()          # 확장하여
+    PARENT = auto()          # 부모의
+    AT = auto()              # @
+    CLASS_METHOD = auto()    # 틀메서드
+    STATIC_METHOD = auto()   # 정적메서드
 
     # 산술 연산자
     PLUS = auto()            # +
@@ -222,6 +235,17 @@ KEYWORDS = {
 
     # 모듈
     '가져오라': TokenType.IMPORT,
+
+    # 클래스
+    '틀': TokenType.CLASS,
+    '생성할때': TokenType.INIT,
+    '소멸할때': TokenType.DESTROY,
+    '자신': TokenType.SELF,
+    '자신의': TokenType.SELF_ATTR,
+    '확장하여': TokenType.EXTEND,
+    '부모의': TokenType.PARENT,
+    '틀메서드': TokenType.CLASS_METHOD,
+    '정적메서드': TokenType.STATIC_METHOD,
 }
 
 
@@ -315,6 +339,12 @@ class Lexer:
             # 점 (속성 접근 또는 실수)
             if char == '.':
                 self.tokens.append(Token(TokenType.DOT, '.', self.line, self.column))
+                self.advance()
+                continue
+
+            # @ (데코레이터)
+            if char == '@':
+                self.tokens.append(Token(TokenType.AT, '@', self.line, self.column))
                 self.advance()
                 continue
 
@@ -553,6 +583,7 @@ class Lexer:
                 '과': TokenType.WITH,
                 '와': TokenType.WITH,
                 '로': TokenType.AS,
+                '의': TokenType.POSSESSIVE,
             }
 
             # 긴 접미사부터 확인 (복합 조사)
@@ -560,15 +591,29 @@ class Lexer:
             for suffix_len in [3, 2, 1]:
                 if len(identifier) > suffix_len:
                     suffix = identifier[-suffix_len:]
+                    base = identifier[:-suffix_len]
+
+                    # base가 키워드이면 항상 분리 (예: "틀을" -> "틀" + "을")
+                    # base가 키워드가 아니고 너무 짧으면 분리하지 않음 (최소 2자 이상)
+                    # 예: "나이"를 "나" + "이"로 분리하지 않음
+                    if base not in KEYWORDS and len(base) < 2:
+                        continue
+
                     if suffix in KEYWORDS:
-                        base = identifier[:-suffix_len]
-                        self.tokens.append(Token(TokenType.IDENTIFIER, base, self.line, start_col))
+                        # base가 키워드인지 확인
+                        if base in KEYWORDS:
+                            self.tokens.append(Token(KEYWORDS[base], base, self.line, start_col))
+                        else:
+                            self.tokens.append(Token(TokenType.IDENTIFIER, base, self.line, start_col))
                         self.tokens.append(Token(KEYWORDS[suffix], suffix, self.line, start_col + len(base)))
                         found_suffix = True
                         break
                     elif suffix in suffix_map:
-                        base = identifier[:-suffix_len]
-                        self.tokens.append(Token(TokenType.IDENTIFIER, base, self.line, start_col))
+                        # base가 키워드인지 확인
+                        if base in KEYWORDS:
+                            self.tokens.append(Token(KEYWORDS[base], base, self.line, start_col))
+                        else:
+                            self.tokens.append(Token(TokenType.IDENTIFIER, base, self.line, start_col))
                         self.tokens.append(Token(suffix_map[suffix], suffix, self.line, start_col + len(base)))
                         found_suffix = True
                         break

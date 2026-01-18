@@ -594,10 +594,18 @@ class Lexer:
                     base = identifier[:-suffix_len]
 
                     # base가 키워드이면 항상 분리 (예: "틀을" -> "틀" + "을")
-                    # base가 키워드가 아니고 너무 짧으면 분리하지 않음 (최소 2자 이상)
+                    # base가 키워드가 아니고 너무 짧으면 분리하지 않음
+                    # "이/가"는 단어 끝에 자주 오므로 base가 3자 이상일 때만 분리
                     # 예: "나이"를 "나" + "이"로 분리하지 않음
-                    if base not in KEYWORDS and len(base) < 2:
-                        continue
+                    # 예: "고양이"를 "고양" + "이"로 분리하지 않음
+                    # 다른 접미사는 base가 2자 이상일 때 분리
+                    if base not in KEYWORDS:
+                        # 이/가는 한국어 단어 끝에 자주 나오므로 더 엄격하게
+                        if suffix in ('이', '가') and len(base) < 3:
+                            continue
+                        # 다른 접미사는 base가 2자 이상이면 분리
+                        if len(base) < 2:
+                            continue
 
                     if suffix in KEYWORDS:
                         # base가 키워드인지 확인

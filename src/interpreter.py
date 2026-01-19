@@ -27,6 +27,12 @@ class ReturnException(Exception):
         self.value = value
 
 
+class YieldException(Exception):
+    """제너레이터 yield 예외"""
+    def __init__(self, value: Any):
+        self.value = value
+
+
 class BoyakError(Exception):
     """보약 런타임 에러"""
     def __init__(self, message: str, line: int = 0):
@@ -93,6 +99,19 @@ class BoyakFunction:
 
     def __repr__(self):
         return f"<함수 {self.name}>"
+
+
+class BoyakLambda:
+    """보약 람다 함수"""
+
+    def __init__(self, parameters: List[str], body, closure: Environment):
+        self.parameters = parameters
+        self.body = body  # Expression (not List[Statement])
+        self.closure = closure
+
+    def __repr__(self):
+        params = ", ".join(self.parameters) if self.parameters else ""
+        return f"<람다 ({params}) -> ...>"
 
 
 class BoyakMethod:
@@ -183,6 +202,242 @@ class BoyakModule:
         raise AttributeError(f"모듈 '{self.name}'에 '{name}'이(가) 없습니다")
 
 
+class BoyakEnumMember:
+    """보약 열거형 멤버"""
+
+    def __init__(self, name: str, value: Any, enum_name: str):
+        self._name = name
+        self._value = value
+        self._enum_name = enum_name
+
+    @property
+    def name(self):
+        return self._name
+
+    @property
+    def value(self):
+        return self._value
+
+    @property
+    def enum_name(self):
+        return self._enum_name
+
+    def __repr__(self):
+        return f"{self._enum_name}.{self._name}"
+
+    def __str__(self):
+        return f"{self._enum_name}.{self._name}"
+
+    def __eq__(self, other):
+        if isinstance(other, BoyakEnumMember):
+            return self._name == other._name and self._enum_name == other._enum_name
+        return False
+
+    def __hash__(self):
+        return hash((self._enum_name, self._name))
+
+    def __getattr__(self, name: str) -> Any:
+        # 한글 속성 지원
+        if name == '이름':
+            return self._name
+        if name == '값':
+            return self._value
+        if name == '열거형':
+            return self._enum_name
+        raise AttributeError(f"열거형 멤버에 '{name}' 속성이 없습니다")
+
+
+class BoyakEnum:
+    """보약 열거형"""
+
+    def __init__(self, name: str, members: Dict[str, 'BoyakEnumMember']):
+        self.name = name
+        self.members = members
+
+    def __repr__(self):
+        return f"<열거형 {self.name}>"
+
+    def __getattr__(self, name: str) -> 'BoyakEnumMember':
+        if name in ('name', 'members'):
+            return object.__getattribute__(self, name)
+        if name in self.members:
+            return self.members[name]
+        raise AttributeError(f"열거형 '{self.name}'에 '{name}' 멤버가 없습니다")
+
+
+class BoyakGeneratorDef:
+    """보약 제너레이터 정의"""
+
+    def __init__(self, name: str, parameters: List[str],
+                 default_values: Dict[str, Any], body: List['Statement'],
+                 closure: 'Environment'):
+        self.name = name
+        self.parameters = parameters
+        self.default_values = default_values
+        self.body = body
+        self.closure = closure
+
+    def __repr__(self):
+        return f"<제너레이터 {self.name}>"
+
+
+class BoyakGenerator:
+    """보약 제너레이터 인스턴스 (Python generator를 래핑)"""
+
+    def __init__(self, gen_def: 'BoyakGeneratorDef', interpreter: 'Interpreter',
+                 args: List[Any] = None):
+        self.gen_def = gen_def
+        self.interpreter = interpreter
+        self.args = args or []
+        self._iterator = None
+
+    def __repr__(self):
+        return f"<제너레이터 인스턴스 {self.gen_def.name}>"
+
+    def __iter__(self):
+        return self._create_iterator()
+
+    def _create_iterator(self):
+        """Python 제너레이터를 생성하여 yield 문을 처리"""
+        # 새로운 환경 생성
+        env = Environment(self.gen_def.closure)
+
+        # 매개변수 바인딩
+        for i, param in enumerate(self.gen_def.parameters):
+            if i < len(self.args):
+                env.define(param, self.args[i])
+            elif param in self.gen_def.default_values:
+                env.define(param, self.gen_def.default_values[param])
+
+        # 제너레이터 실행
+        for value in self._execute_body(env, self.gen_def.body):
+            yield value
+
+    def _execute_body(self, env: 'Environment', statements: List['Statement']):
+        """본문 실행 중 yield 값을 생성"""
+        old_env = self.interpreter.current_env
+        self.interpreter.current_env = env
+
+        try:
+            for stmt in statements:
+                result = self._execute_with_yield(stmt)
+                if result is not None:
+                    for value in result:
+                        yield value
+        finally:
+            self.interpreter.current_env = old_env
+
+    def _execute_with_yield(self, stmt):
+        """yield 문을 처리하면서 문장 실행"""
+        if isinstance(stmt, YieldStatement):
+            value = self.interpreter.evaluate(stmt.value) if stmt.value else None
+            yield value
+        elif isinstance(stmt, WhileStatement):
+            # 반복문 처리
+            while self.interpreter._is_truthy(self.interpreter.evaluate(stmt.condition)):
+                try:
+                    for s in stmt.body:
+                        result = self._execute_with_yield(s)
+                        if result is not None:
+                            for value in result:
+                                yield value
+                except BreakException:
+                    break
+                except ContinueException:
+                    continue
+        elif isinstance(stmt, ForRangeStatement):
+            # 범위 반복문 처리
+            start = self.interpreter.evaluate(stmt.start)
+            end = self.interpreter.evaluate(stmt.end)
+            step = self.interpreter.evaluate(stmt.step) if stmt.step else 1
+
+            if stmt.reverse:
+                step = -abs(step)
+                start, end = end, start
+
+            if step > 0:
+                if stmt.inclusive:
+                    range_vals = range(start, end + 1, step)
+                else:
+                    range_vals = range(start, end, step)
+            else:
+                if stmt.inclusive:
+                    range_vals = range(start, end - 1, step)
+                else:
+                    range_vals = range(start, end, step)
+
+            for i in range_vals:
+                self.interpreter.current_env.define(stmt.variable, i)
+                try:
+                    for s in stmt.body:
+                        result = self._execute_with_yield(s)
+                        if result is not None:
+                            for value in result:
+                                yield value
+                except BreakException:
+                    break
+                except ContinueException:
+                    continue
+        elif isinstance(stmt, ForEachStatement):
+            # foreach 반복문 처리
+            iterable = self.interpreter.evaluate(stmt.iterable)
+            for item in iterable:
+                self.interpreter.current_env.define(stmt.variable, item)
+                try:
+                    for s in stmt.body:
+                        result = self._execute_with_yield(s)
+                        if result is not None:
+                            for value in result:
+                                yield value
+                except BreakException:
+                    break
+                except ContinueException:
+                    continue
+        elif isinstance(stmt, InfiniteLoop):
+            # 무한 반복문 처리
+            while True:
+                try:
+                    for s in stmt.body:
+                        result = self._execute_with_yield(s)
+                        if result is not None:
+                            for value in result:
+                                yield value
+                except BreakException:
+                    break
+                except ContinueException:
+                    continue
+        elif isinstance(stmt, IfStatement):
+            # 조건문 처리
+            if self.interpreter._is_truthy(self.interpreter.evaluate(stmt.condition)):
+                for s in stmt.then_body:
+                    result = self._execute_with_yield(s)
+                    if result is not None:
+                        for value in result:
+                            yield value
+            else:
+                # elif 처리
+                matched = False
+                for condition, body in stmt.elif_clauses:
+                    if self.interpreter._is_truthy(self.interpreter.evaluate(condition)):
+                        for s in body:
+                            result = self._execute_with_yield(s)
+                            if result is not None:
+                                for value in result:
+                                    yield value
+                        matched = True
+                        break
+                # else 처리
+                if not matched and stmt.else_body:
+                    for s in stmt.else_body:
+                        result = self._execute_with_yield(s)
+                        if result is not None:
+                            for value in result:
+                                yield value
+        else:
+            # 일반 문장 실행
+            self.interpreter.execute(stmt)
+
+
 class Interpreter:
     """보약 인터프리터"""
 
@@ -216,9 +471,21 @@ class Interpreter:
         self.global_env.define('정렬', sorted)
         self.global_env.define('뒤집기', lambda x: list(reversed(x)))
         self.global_env.define('범위', lambda *args: list(range(*args)))
+        self.global_env.define('집합', set)
+        self.global_env.define('튜플', tuple)
+
+        # 집합 연산
+        self.global_env.define('합집합', lambda a, b: a.union(b))
+        self.global_env.define('교집합', lambda a, b: a.intersection(b))
+        self.global_env.define('차집합', lambda a, b: a.difference(b))
+        self.global_env.define('대칭차집합', lambda a, b: a.symmetric_difference(b))
 
         # 타입 확인
         self.global_env.define('타입', type)
+
+        # 파일 입출력
+        self.global_env.define('열기', open)
+        self.global_env.define('닫기', lambda f: f.close())
 
         # 모듈
         self.global_env.define('수학', math)
@@ -239,6 +506,10 @@ class Interpreter:
         for statement in program.statements:
             result = self.execute(statement)
         return result
+
+    def execute_Program(self, node: Program) -> Any:
+        """Program 노드 실행 (execute 메서드에서 호출됨)"""
+        return self.execute_program(node)
 
     def execute(self, node: ASTNode) -> Any:
         """노드 실행"""
@@ -281,6 +552,19 @@ class Interpreter:
             if self.current_instance is None:
                 self.error("'자신의'는 메서드 내부에서만 사용할 수 있습니다", node.line)
             self.current_instance.set(node.target.attribute, value)
+
+    def execute_MultipleAssignment(self, node: MultipleAssignment) -> None:
+        """다중 할당 실행 (가, 나는 1, 2이다)"""
+        value = self.evaluate(node.value)
+
+        # 값이 튜플/리스트인 경우 언패킹
+        if isinstance(value, (tuple, list)):
+            if len(value) != len(node.targets):
+                self.error(f"할당할 값의 개수({len(value)})가 변수 개수({len(node.targets)})와 다릅니다", node.line)
+            for target, val in zip(node.targets, value):
+                self.current_env.define(target.name, val)
+        else:
+            self.error(f"다중 할당에는 튜플이나 목록이 필요합니다", node.line)
 
     def execute_CompoundAssignment(self, node: CompoundAssignment) -> None:
         current = self.current_env.get(node.target.name)
@@ -344,12 +628,16 @@ class Interpreter:
         end = self.evaluate(node.end)
         step = self.evaluate(node.step) if node.step else 1
 
-        if node.inclusive:
-            end += 1
-
         if node.reverse:
-            range_values = range(end - 1, start - 1, -step)
+            # 역순: start에서 end까지 감소 (예: 5부터 1까지 -> 5, 4, 3, 2, 1)
+            if node.inclusive:
+                range_values = range(start, end - 1, -step)
+            else:
+                range_values = range(start, end, -step)
         else:
+            # 정순: start에서 end까지 증가
+            if node.inclusive:
+                end += 1
             range_values = range(start, end, step)
 
         result = None
@@ -433,7 +721,24 @@ class Interpreter:
             body=node.body,
             closure=self.current_env
         )
-        self.current_env.define(node.name, function)
+
+        # 데코레이터 적용 (역순으로 적용)
+        if node.decorators:
+            result = function
+            for decorator_expr in reversed(node.decorators):
+                decorator = self.evaluate(decorator_expr)
+                # 보약 함수인 경우 호출
+                if isinstance(decorator, BoyakFunction):
+                    result = self._call_function(decorator, [result], {})
+                elif isinstance(decorator, BoyakLambda):
+                    result = self._call_lambda(decorator, [result])
+                elif callable(decorator):
+                    result = decorator(result)
+                else:
+                    self.error(f"데코레이터는 호출 가능해야 합니다: {decorator}", node.line)
+            self.current_env.define(node.name, result)
+        else:
+            self.current_env.define(node.name, function)
 
     def execute_ReturnStatement(self, node: ReturnStatement) -> None:
         value = None
@@ -594,6 +899,107 @@ class Interpreter:
         """생성자 정의는 ClassDef에서 처리됨"""
         pass
 
+    def execute_EnumDef(self, node: EnumDef) -> None:
+        """열거형 정의 실행"""
+        members = {}
+
+        for i, member_name in enumerate(node.members):
+            # 값이 지정된 경우 사용, 아니면 인덱스 사용
+            if member_name in node.values:
+                value = self.evaluate(node.values[member_name])
+            else:
+                value = i
+
+            members[member_name] = BoyakEnumMember(
+                name=member_name,
+                value=value,
+                enum_name=node.name
+            )
+
+        # 열거형 객체 생성
+        enum_obj = BoyakEnum(name=node.name, members=members)
+
+        # 환경에 열거형 등록
+        self.current_env.define(node.name, enum_obj)
+
+    def execute_MatchStatement(self, node: MatchStatement) -> None:
+        """패턴 매칭문 실행"""
+        subject_value = self.evaluate(node.subject)
+
+        for case in node.cases:
+            if case.is_default:
+                # 기본 케이스 (그외에)
+                self.execute_block(case.body)
+                return
+
+            # 패턴 매칭 검사
+            pattern_value = self.evaluate(case.pattern)
+
+            if self._match_pattern(subject_value, pattern_value):
+                self.execute_block(case.body)
+                return
+
+    def _match_pattern(self, subject: Any, pattern: Any) -> bool:
+        """패턴 매칭 검사"""
+        # 기본 값 비교
+        if subject == pattern:
+            return True
+
+        # 열거형 멤버 비교
+        if isinstance(subject, BoyakEnumMember) and isinstance(pattern, BoyakEnumMember):
+            return subject == pattern
+
+        # 타입 매칭 (추후 확장 가능)
+        return False
+
+    def execute_GeneratorDef(self, node: GeneratorDef) -> None:
+        """제너레이터 정의 실행"""
+        gen_def = BoyakGeneratorDef(
+            name=node.name,
+            parameters=node.parameters,
+            default_values=node.default_values,
+            body=node.body,
+            closure=self.current_env
+        )
+
+        # 환경에 제너레이터 등록
+        self.current_env.define(node.name, gen_def)
+
+    def execute_YieldStatement(self, node: YieldStatement) -> Any:
+        """yield 문 실행 (제너레이터 컨텍스트에서만 사용)"""
+        # 이 메서드는 BoyakGenerator에서 직접 처리하므로
+        # 여기서 호출되면 에러
+        self.error("yield는 제너레이터 내부에서만 사용할 수 있습니다", node.line)
+
+    def execute_WithStatement(self, node: WithStatement) -> None:
+        """with 문 실행"""
+        context = self.evaluate(node.context)
+
+        # 컨텍스트 매니저 프로토콜 확인
+        enter_method = getattr(context, '__enter__', None)
+        exit_method = getattr(context, '__exit__', None)
+
+        if enter_method is None or exit_method is None:
+            self.error("컨텍스트 매니저가 필요합니다 (__enter__/__exit__ 메서드)", node.line)
+
+        # __enter__ 호출
+        value = enter_method()
+
+        # 변수에 바인딩
+        if node.variable:
+            self.current_env.define(node.variable, value)
+
+        try:
+            # 본문 실행
+            self.execute_block(node.body)
+        except Exception as e:
+            # __exit__에 예외 정보 전달
+            exit_method(type(e), e, None)
+            raise
+        else:
+            # 정상 종료 시 __exit__ 호출
+            exit_method(None, None, None)
+
     def execute_block(self, statements: List[Statement]) -> Any:
         """블록 실행"""
         result = None
@@ -624,9 +1030,104 @@ class Interpreter:
     def evaluate_DictLiteral(self, node: DictLiteral) -> dict:
         return {self.evaluate(k): self.evaluate(v) for k, v in node.pairs}
 
+    def evaluate_TupleLiteral(self, node: TupleLiteral) -> tuple:
+        return tuple(self.evaluate(elem) for elem in node.elements)
+
+    def evaluate_ListComprehension(self, node: ListComprehension) -> list:
+        """리스트 컴프리헨션 평가: [표현식 각각의 변수를 목록에서]"""
+        iterable = self.evaluate(node.iterable)
+        result = []
+
+        for item in iterable:
+            # 새 환경에서 변수 바인딩
+            env = Environment(self.current_env)
+            env.define(node.variable, item)
+
+            prev_env = self.current_env
+            self.current_env = env
+            try:
+                # 조건이 있으면 필터링
+                if node.condition is not None:
+                    condition = self.evaluate(node.condition)
+                    if not self._is_truthy(condition):
+                        continue
+
+                # 표현식 평가
+                value = self.evaluate(node.expression)
+                result.append(value)
+            finally:
+                self.current_env = prev_env
+
+        return result
+
+    def evaluate_OptionalChain(self, node: OptionalChain) -> Any:
+        """안전 속성 접근 (?.) 평가: 대상이 없음이면 없음 반환"""
+        target = self.evaluate(node.target)
+
+        if target is None:
+            return None
+
+        if isinstance(target, BoyakInstance):
+            return target.get(node.attribute)
+        elif hasattr(target, node.attribute):
+            return getattr(target, node.attribute)
+        else:
+            return None
+
+    def evaluate_NullCoalesce(self, node: NullCoalesce) -> Any:
+        """널 병합 연산자 (??) 평가: 왼쪽이 없음이면 오른쪽 반환"""
+        left = self.evaluate(node.left)
+
+        if left is None:
+            return self.evaluate(node.right)
+
+        return left
+
+    def evaluate_Lambda(self, node) -> BoyakLambda:
+        """람다 표현식 평가 - 람다 객체 생성"""
+        return BoyakLambda(
+            parameters=node.parameters,
+            body=node.body,
+            closure=self.current_env
+        )
+
+    # 연산자 오버라이딩을 위한 특수 메서드 이름 매핑
+    OPERATOR_METHODS = {
+        '+': '더하기',
+        '-': '빼기',
+        '*': '곱하기',
+        '/': '나누기',
+        '//': '몫',
+        '%': '나머지',
+        '**': '거듭제곱',
+        '==': '같음',
+        '!=': '다름',
+        '<': '작음',
+        '>': '큼',
+        '<=': '작거나같음',
+        '>=': '크거나같음',
+    }
+
     def evaluate_BinaryOp(self, node: BinaryOp) -> Any:
         left = self.evaluate(node.left)
         right = self.evaluate(node.right)
+
+        # 연산자 오버라이딩: 왼쪽 피연산자가 BoyakInstance이면 특수 메서드 확인
+        if isinstance(left, BoyakInstance):
+            method_name = self.OPERATOR_METHODS.get(node.operator)
+            if method_name:
+                method_def = left.klass.get_method(method_name)
+                if method_def:
+                    # MethodDef를 BoyakMethod로 변환
+                    method = BoyakMethod(
+                        name=method_def.name,
+                        parameters=method_def.parameters,
+                        default_values=method_def.default_values,
+                        body=method_def.body,
+                        instance=left,
+                        klass=left.klass
+                    )
+                    return self._call_method(method, [right], {})
 
         ops = {
             '+': lambda a, b: a + b,
@@ -644,6 +1145,9 @@ class Interpreter:
             '>=': lambda a, b: a >= b,
             'and': lambda a, b: a and b,
             'or': lambda a, b: a or b,
+            'in': lambda a, b: a in b,
+            'not in': lambda a, b: a not in b,
+            'divisible': lambda a, b: a % b == 0,
         }
 
         if node.operator in ops:
@@ -660,6 +1164,14 @@ class Interpreter:
             return not self._is_truthy(operand)
 
         self.error(f"알 수 없는 단항 연산자: {node.operator}")
+
+    def evaluate_TernaryOp(self, node: TernaryOp) -> Any:
+        """삼항 연산자 평가: 조건이면 참값 아니면 거짓값"""
+        condition = self.evaluate(node.condition)
+        if self._is_truthy(condition):
+            return self.evaluate(node.true_value)
+        else:
+            return self.evaluate(node.false_value)
 
     def evaluate_IndexAccess(self, node: IndexAccess) -> Any:
         target = self.evaluate(node.target)
@@ -731,6 +1243,14 @@ class Interpreter:
         if isinstance(function, BoyakFunction):
             return self._call_function(function, args, kwargs)
 
+        # 람다 함수
+        if isinstance(function, BoyakLambda):
+            return self._call_lambda(function, args)
+
+        # 제너레이터
+        if isinstance(function, BoyakGeneratorDef):
+            return BoyakGenerator(function, self, args)
+
         self.error(f"호출할 수 없는 객체: {function}")
 
     def _call_function(self, function: BoyakFunction, args: List[Any],
@@ -746,7 +1266,9 @@ class Interpreter:
             elif param in kwargs:
                 env.define(param, kwargs[param])
             elif param in function.default_values:
-                env.define(param, function.default_values[param])
+                # 기본값은 AST 노드이므로 평가 필요
+                default_value = self.evaluate(function.default_values[param])
+                env.define(param, default_value)
             else:
                 self.error(f"필수 매개변수 '{param}'가 없습니다")
 
@@ -759,6 +1281,29 @@ class Interpreter:
             return None
         except ReturnException as e:
             return e.value
+        finally:
+            self.current_env = prev_env
+
+    def _call_lambda(self, lambda_func: BoyakLambda, args: List[Any]) -> Any:
+        """람다 함수 호출"""
+        # 매개변수 개수 확인
+        if len(args) != len(lambda_func.parameters):
+            self.error(f"람다 함수는 {len(lambda_func.parameters)}개의 인수가 필요하지만 {len(args)}개가 전달되었습니다")
+
+        # 새 환경 생성 (클로저 사용)
+        env = Environment(lambda_func.closure)
+
+        # 매개변수 바인딩
+        for param, arg in zip(lambda_func.parameters, args):
+            env.define(param, arg)
+
+        # 람다 본문 실행 (표현식)
+        prev_env = self.current_env
+        self.current_env = env
+
+        try:
+            result = self.evaluate(lambda_func.body)
+            return result
         finally:
             self.current_env = prev_env
 
@@ -825,7 +1370,9 @@ class Interpreter:
             elif param in kwargs:
                 env.define(param, kwargs[param])
             elif param in method.default_values:
-                env.define(param, method.default_values[param])
+                # 기본값은 AST 노드이므로 평가 필요
+                default_value = self.evaluate(method.default_values[param])
+                env.define(param, default_value)
             else:
                 self.error(f"메서드의 필수 매개변수 '{param}'가 없습니다")
 

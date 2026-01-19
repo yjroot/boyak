@@ -108,9 +108,17 @@ class Parser:
         if self.match(TokenType.ALWAYS):
             return self.parse_constant_declaration()
 
+        # 데코레이터로 시작하는 문장 (@)
+        if self.match(TokenType.AT):
+            return self.parse_decorated_function()
+
         # 식별자로 시작하는 문장들
         if self.match(TokenType.IDENTIFIER):
             return self.parse_identifier_statement()
+
+        # 클래스 정의 (파이썬 스타일): 틀 클래스명:
+        if self.match(TokenType.CLASS):
+            return self.parse_python_style_class()
 
         # 자신의로 시작하는 문장 (메서드 내부)
         if self.match(TokenType.SELF_ATTR):
@@ -128,6 +136,20 @@ class Parser:
         if self.match(TokenType.ELSE, TokenType.ELIF):
             self.error("조건문 밖에서 '그외에/아니면' 사용")
 
+        # 괄호로 시작하는 문장 (람다 또는 그룹 표현식)
+        if self.match(TokenType.LPAREN):
+            expr = self.parse_expression()
+            # 표현식 뒤에 출력/반환 문장이 올 수 있음
+            if self.match(TokenType.OBJECT):  # 을/를
+                self.advance()
+                if self.match(TokenType.PRINT):  # 출력하라
+                    self.advance()
+                    return PrintStatement(value=expr, line=token.line)
+                if self.match(TokenType.RETURN):  # 돌려주라
+                    self.advance()
+                    return ReturnStatement(value=expr, line=token.line)
+            return ExpressionStatement(expression=expr, line=token.line)
+
         return None
 
     def parse_identifier_statement(self) -> Statement:
@@ -143,6 +165,46 @@ class Parser:
                 if self.match(TokenType.DEFINE):  # 정의하자
                     return self.parse_class_def(name, start_token)
 
+        # 열거형 정의: "색상 열거형을 정의하자"
+        if self.match(TokenType.ENUM):  # 열거형
+            self.advance()
+            if self.match(TokenType.OBJECT):  # 을
+                self.advance()
+                if self.match(TokenType.DEFINE):  # 정의하자
+                    return self.parse_enum_def(name, start_token)
+
+        # 제너레이터 정의: "숫자생성기 생성기를 정의하자"
+        if self.match(TokenType.GENERATOR):  # 생성기
+            self.advance()
+            if self.match(TokenType.OBJECT):  # 를
+                self.advance()
+                if self.match(TokenType.DEFINE):  # 정의하자
+                    return self.parse_generator_def(name, start_token)
+
+        # 다중 할당: 가, 나는 값이다
+        if self.match(TokenType.COMMA):
+            targets = [Identifier(name=name, line=start_token.line)]
+            while self.match(TokenType.COMMA):
+                self.advance()
+                target_name = self.expect(TokenType.IDENTIFIER, "변수 이름이 필요합니다").value
+                targets.append(Identifier(name=target_name, line=start_token.line))
+            if self.match(TokenType.TOPIC_MARKER):  # 은/는
+                self.advance()
+                value = self.parse_expression()
+                if self.match(TokenType.IS):  # 이다
+                    self.advance()
+                return MultipleAssignment(
+                    targets=targets,
+                    value=value,
+                    line=start_token.line
+                )
+
+        # 변수: 타입은 값이다 패턴 (타입 힌트)
+        type_annotation = None
+        if self.match(TokenType.COLON):
+            self.advance()
+            type_annotation = self.expect(TokenType.IDENTIFIER, "타입 이름이 필요합니다").value
+
         # 변수명은 값이다 패턴
         if self.match(TokenType.TOPIC_MARKER):  # 은/는
             self.advance()
@@ -152,6 +214,7 @@ class Parser:
             return Assignment(
                 target=Identifier(name=name, line=start_token.line),
                 value=value,
+                type_annotation=type_annotation,
                 line=start_token.line
             )
 
@@ -187,8 +250,41 @@ class Parser:
                     value=Identifier(name=name, line=start_token.line),
                     line=start_token.line
                 )
+            if self.match(TokenType.YIELD):  # 내보내라
+                self.advance()
+                return YieldStatement(
+                    value=Identifier(name=name, line=start_token.line),
+                    line=start_token.line
+                )
             if self.match(TokenType.DEFINE):  # 정의하자
                 return self.parse_function_def(name, start_token)
+            if self.match(TokenType.MATCH):  # 맞춰보자
+                return self.parse_match_statement(
+                    Identifier(name=name, line=start_token.line),
+                    start_token
+                )
+            if self.match(TokenType.WITH_CONTEXT):  # 사용하여
+                return self.parse_with_statement(
+                    Identifier(name=name, line=start_token.line),
+                    None,
+                    start_token
+                )
+            # 리소스를 변수로 사용하여 (with ... as ...)
+            if self.match(TokenType.IDENTIFIER):
+                var_name = self.advance().value
+                if self.match(TokenType.AS):  # 으로
+                    self.advance()
+                    if self.match(TokenType.WITH_CONTEXT):  # 사용하여
+                        return self.parse_with_statement(
+                            Identifier(name=name, line=start_token.line),
+                            var_name,
+                            start_token
+                        )
+                    # 원래 위치로 복귀 (AS 이후 다른 패턴일 수 있음)
+                    self.pos -= 2
+                else:
+                    # 원래 위치로 복귀
+                    self.pos -= 1
             if self.match(TokenType.IMPORT):  # 가져오라
                 self.advance()
                 return ImportStatement(
@@ -227,7 +323,46 @@ class Parser:
             )
 
         # 조건인동안 반복하자 (변수가 조건으로 시작)
-        # 일반 표현식으로 처리
+        # 패턴: 변수가 값보다 비교동안 반복하자
+        if self.match(TokenType.SUBJECT):  # 이/가
+            saved_pos = self.pos  # 위치 저장 (롤백용)
+            self.advance()
+            # 비교 대상 파싱
+            right = self.parse_additive()
+
+            # X가 Y보다 작은/큰/... 동안 반복하자
+            if self.match(TokenType.THAN):  # 보다
+                self.advance()
+                if self.match(TokenType.GREATER, TokenType.LESS,
+                              TokenType.GREATER_EQUAL, TokenType.LESS_EQUAL):
+                    cmp_token = self.advance()
+                    op_map = {
+                        TokenType.GREATER: '>',
+                        TokenType.LESS: '<',
+                        TokenType.GREATER_EQUAL: '>=',
+                        TokenType.LESS_EQUAL: '<=',
+                    }
+                    cmp_op = op_map[cmp_token.type]
+
+                    if self.match(TokenType.WHILE):  # 동안
+                        self.advance()
+                        self.expect(TokenType.LOOP, "'반복하자'가 필요합니다")
+                        condition = BinaryOp(
+                            operator=cmp_op,
+                            left=Identifier(name=name, line=start_token.line),
+                            right=right
+                        )
+                        self.skip_newlines()
+                        self.expect(TokenType.INDENT, "들여쓰기가 필요합니다")
+                        body = self.parse_block()
+                        return WhileStatement(
+                            condition=condition,
+                            body=body,
+                            line=start_token.line
+                        )
+
+            # while 패턴이 아니면 SUBJECT 진입 전으로 롤백
+            self.pos = saved_pos
 
         # 기타: 표현식 문장
         # 뒤로 돌아가서 전체 표현식 파싱
@@ -243,6 +378,24 @@ class Parser:
             if self.match(TokenType.RETURN):
                 self.advance()
                 return ReturnStatement(value=expr, line=start_token.line)
+            if self.match(TokenType.YIELD):
+                self.advance()
+                return YieldStatement(value=expr, line=start_token.line)
+            if self.match(TokenType.MATCH):  # 맞춰보자
+                return self.parse_match_statement(expr, start_token)
+            if self.match(TokenType.WITH_CONTEXT):  # 사용하여
+                return self.parse_with_statement(expr, None, start_token)
+            # 표현식를 변수로 사용하여 (with ... as ...)
+            if self.match(TokenType.IDENTIFIER):
+                var_name = self.advance().value
+                if self.match(TokenType.AS):  # 으로/로
+                    self.advance()
+                    if self.match(TokenType.WITH_CONTEXT):  # 사용하여
+                        return self.parse_with_statement(expr, var_name, start_token)
+                    # AS 이후 다른 패턴일 경우 복귀
+                    self.pos -= 2
+                else:
+                    self.pos -= 1
             self.pos -= 1  # 조사 위치로 복귀
 
         return ExpressionStatement(expression=expr, line=start_token.line)
@@ -263,7 +416,7 @@ class Parser:
         if self.match(TokenType.RANGE_START):  # 부터
             return self.parse_range_loop(num, start_token)
 
-        # 숫자를 출력하라 / 돌려주라
+        # 숫자를 출력하라 / 돌려주라 / 내보내라
         if self.match(TokenType.OBJECT):
             self.advance()
             if self.match(TokenType.PRINT):
@@ -272,6 +425,9 @@ class Parser:
             if self.match(TokenType.RETURN):
                 self.advance()
                 return ReturnStatement(value=num, line=start_token.line)
+            if self.match(TokenType.YIELD):
+                self.advance()
+                return YieldStatement(value=num, line=start_token.line)
             self.pos -= 1  # 조사 위치로 복귀
 
         return ExpressionStatement(expression=num, line=start_token.line)
@@ -330,20 +486,24 @@ class Parser:
     def parse_string_statement(self) -> Statement:
         """문자열로 시작하는 문장"""
         start_token = self.current()
-        string_token = self.advance()
 
-        # 문자열 보간 처리
-        if '{' in string_token.value:
-            expr = self.parse_interpolated_string(string_token.value, string_token.line)
-        else:
-            expr = StringLiteral(value=string_token.value, line=string_token.line)
+        # 전체 표현식을 먼저 파싱 (이항 연산 포함)
+        # 단순 문자열 출력, 반환, 이항 연산 등을 모두 처리하기 위해
+        # 문자열을 되감지 않고 전체 표현식을 파싱
+        expr = self.parse_expression()
 
-        # "문자열"을 출력하라
+        # "표현식"을 출력하라 / 돌려주라 / 내보내라
         if self.match(TokenType.OBJECT):  # 을/를
             self.advance()
             if self.match(TokenType.PRINT):  # 출력하라
                 self.advance()
                 return PrintStatement(value=expr, line=start_token.line)
+            if self.match(TokenType.RETURN):  # 돌려주라
+                self.advance()
+                return ReturnStatement(value=expr, line=start_token.line)
+            if self.match(TokenType.YIELD):  # 내보내라
+                self.advance()
+                return YieldStatement(value=expr, line=start_token.line)
             if self.match(TokenType.INPUT):  # 입력받아라
                 self.advance()
                 # 이 경우는 프롬프트가 아닌 문자열을 변수에 저장하는 것이 아님
@@ -354,7 +514,36 @@ class Parser:
 
     def parse_expression(self) -> Expression:
         """표현식 파싱"""
-        return self.parse_or_expression()
+        return self.parse_ternary_expression()
+
+    def parse_ternary_expression(self) -> Expression:
+        """삼항 표현식 파싱: 조건일때 참값 아닐때 거짓값"""
+        condition = self.parse_null_coalesce_expression()
+
+        # 일때 토큰이 있으면 삼항 표현식
+        if self.match(TokenType.TERNARY_IF):  # 일때
+            self.advance()
+            true_value = self.parse_null_coalesce_expression()
+
+            if self.match(TokenType.TERNARY_ELSE):  # 아닐때
+                self.advance()
+                false_value = self.parse_ternary_expression()  # 재귀적으로 중첩 삼항 허용
+                return TernaryOp(condition=condition, true_value=true_value, false_value=false_value)
+            else:
+                self.error("삼항 연산자에는 '아닐때'가 필요합니다")
+
+        return condition
+
+    def parse_null_coalesce_expression(self) -> Expression:
+        """널 병합 표현식: 값 ?? 기본값"""
+        left = self.parse_or_expression()
+
+        while self.match(TokenType.NULL_COALESCE):  # ??
+            self.advance()
+            right = self.parse_or_expression()
+            left = NullCoalesce(left=left, right=right)
+
+        return left
 
     def parse_or_expression(self) -> Expression:
         """OR 표현식"""
@@ -390,25 +579,53 @@ class Parser:
         """비교 표현식"""
         left = self.parse_additive()
 
+        # 기호 비교 연산자: ==, !=, <, >, <=, >=
+        while self.match(TokenType.EQ, TokenType.NE, TokenType.LT,
+                         TokenType.GT, TokenType.LE, TokenType.GE):
+            op_map = {
+                TokenType.EQ: '==',
+                TokenType.NE: '!=',
+                TokenType.LT: '<',
+                TokenType.GT: '>',
+                TokenType.LE: '<=',
+                TokenType.GE: '>=',
+            }
+            op = op_map[self.current().type]
+            self.advance()
+            right = self.parse_additive()
+            left = BinaryOp(operator=op, left=left, right=right)
+            return left  # 비교 연산은 체이닝하지 않음
+
         # 한글 비교: "X가 Y보다 크면" 또는 "X가 Y와 같으면"
         if self.match(TokenType.SUBJECT):  # 이/가
             self.advance()
+
+            # "X가 아니면" = "if X is not true" (아니면 = 아니다 + 면)
+            if self.match(TokenType.ELIF):  # 아니면
+                self.advance()  # 아니면은 NOT + THEN 역할을 함
+                return UnaryOp(operator='not', operand=left)
+
             right = self.parse_additive()
 
             if self.match(TokenType.THAN):  # 보다
                 self.advance()
-                if self.match(TokenType.GREATER_EQUAL):
+                if self.match(TokenType.GREATER_EQUAL, TokenType.LESS_EQUAL,
+                              TokenType.GREATER, TokenType.LESS):
+                    token = self.current()
+                    op_map = {
+                        TokenType.GREATER_EQUAL: '>=',
+                        TokenType.LESS_EQUAL: '<=',
+                        TokenType.GREATER: '>',
+                        TokenType.LESS: '<',
+                    }
+                    op = op_map[token.type]
                     self.advance()
-                    return BinaryOp(operator='>=', left=left, right=right)
-                elif self.match(TokenType.LESS_EQUAL):
-                    self.advance()
-                    return BinaryOp(operator='<=', left=left, right=right)
-                elif self.match(TokenType.GREATER):
-                    self.advance()
-                    return BinaryOp(operator='>', left=left, right=right)
-                elif self.match(TokenType.LESS):
-                    self.advance()
-                    return BinaryOp(operator='<', left=left, right=right)
+                    comparison = BinaryOp(operator=op, left=left, right=right)
+                    # "고"로 끝나면 AND로 다음 조건과 연결
+                    if token.value.endswith('고'):
+                        right_cond = self.parse_comparison()
+                        return BinaryOp(operator='and', left=comparison, right=right_cond)
+                    return comparison
 
             if self.match(TokenType.WITH):  # 과/와
                 self.advance()
@@ -418,6 +635,23 @@ class Parser:
                 elif self.match(TokenType.NOT_EQUAL):
                     self.advance()
                     return BinaryOp(operator='!=', left=left, right=right)
+
+            # "X가 Y에 있으면/없으면" - 포함 확인
+            if self.match(TokenType.LOCATION):  # 에
+                self.advance()
+                if self.match(TokenType.IN):  # 있으면
+                    self.advance()
+                    return BinaryOp(operator='in', left=left, right=right)
+                elif self.match(TokenType.NOT_IN):  # 없으면
+                    self.advance()
+                    return BinaryOp(operator='not in', left=left, right=right)
+
+            # "X가 Y로/으로 나누어떨어지면" - 나눗셈 검사
+            if self.match(TokenType.AS, TokenType.TO):  # 으로/로
+                self.advance()
+                if self.match(TokenType.DIVISIBLE):  # 나누어떨어지면
+                    self.advance()
+                    return BinaryOp(operator='divisible', left=left, right=right)
 
         return left
 
@@ -486,16 +720,26 @@ class Parser:
             elif self.match(TokenType.DOT):
                 # 속성 접근 (점 표기)
                 self.advance()
-                if self.match(TokenType.IDENTIFIER):
+                # 속성 이름으로 키워드도 허용 (예: .열거형)
+                if self.match(TokenType.IDENTIFIER, TokenType.ENUM):
                     attr = self.advance().value
                     expr = AttributeAccess(target=expr, attribute=attr)
+                else:
+                    self.error("속성 이름이 필요합니다")
+
+            elif self.match(TokenType.OPTIONAL_CHAIN):
+                # 안전 속성 접근 (?.)
+                self.advance()
+                if self.match(TokenType.IDENTIFIER, TokenType.ENUM):
+                    attr = self.advance().value
+                    expr = OptionalChain(target=expr, attribute=attr)
                 else:
                     self.error("속성 이름이 필요합니다")
 
             elif self.match(TokenType.POSSESSIVE):
                 # 속성 접근 (소유격 '의')
                 self.advance()
-                if self.match(TokenType.IDENTIFIER):
+                if self.match(TokenType.IDENTIFIER, TokenType.ENUM):
                     attr = self.advance().value
                     expr = AttributeAccess(target=expr, attribute=attr)
                 else:
@@ -578,9 +822,14 @@ class Parser:
                 self.expect(TokenType.RPAREN, "')'가 필요합니다")
             return ParentCall(method=method_name, arguments=args, line=token.line)
 
-        # 식별자
+        # 식별자 또는 람다 (단일 매개변수)
         if self.match(TokenType.IDENTIFIER):
             self.advance()
+            # 람다: 매개변수 -> 표현식
+            if self.match(TokenType.ARROW):
+                self.advance()
+                body = self.parse_expression()
+                return Lambda(parameters=[token.value], body=body, line=token.line)
             return Identifier(name=token.value, line=token.line)
 
         # 목록
@@ -591,17 +840,66 @@ class Parser:
         if self.match(TokenType.LBRACE):
             return self.parse_dict_literal()
 
-        # 괄호
+        # 괄호 또는 람다 (다중 매개변수)
         if self.match(TokenType.LPAREN):
             self.advance()
-            expr = self.parse_expression()
+            start_pos = self.pos
+
+            # 빈 괄호 -> 람다 () -> 표현식
+            if self.match(TokenType.RPAREN):
+                self.advance()
+                if self.match(TokenType.ARROW):
+                    self.advance()
+                    body = self.parse_expression()
+                    return Lambda(parameters=[], body=body, line=token.line)
+                # 빈 괄호는 에러
+                self.error("빈 괄호는 허용되지 않습니다")
+
+            # 첫 번째 요소 파싱
+            first = self.parse_expression()
+
+            # 쉼표가 있으면 튜플 또는 람다 매개변수 목록
+            if self.match(TokenType.COMMA):
+                elements = [first]
+                while self.match(TokenType.COMMA):
+                    self.advance()
+                    elements.append(self.parse_expression())
+                self.expect(TokenType.RPAREN, "')'가 필요합니다")
+
+                # ARROW가 있으면 람다
+                if self.match(TokenType.ARROW):
+                    # 모든 요소가 식별자여야 함
+                    params = []
+                    for elem in elements:
+                        if isinstance(elem, Identifier):
+                            params.append(elem.name)
+                        else:
+                            self.error("람다 매개변수는 식별자여야 합니다")
+                    self.advance()
+                    body = self.parse_expression()
+                    return Lambda(parameters=params, body=body, line=token.line)
+
+                # ARROW가 없으면 튜플
+                return TupleLiteral(elements=elements, line=token.line)
+
+            # 단일 요소 후 RPAREN
             self.expect(TokenType.RPAREN, "')'가 필요합니다")
-            return expr
+
+            # (단일식별자) -> 표현식 형태의 람다
+            if self.match(TokenType.ARROW) and isinstance(first, Identifier):
+                self.advance()
+                body = self.parse_expression()
+                return Lambda(parameters=[first.name], body=body, line=token.line)
+
+            return first
 
         self.error(f"예상치 못한 토큰: {token}")
 
     def parse_interpolated_string(self, template: str, line: int) -> Expression:
         """문자열 보간 파싱"""
+        from lexer import tokenize
+        import re
+
         parts = []
         current = ""
         i = 0
@@ -611,13 +909,31 @@ class Parser:
                 if current:
                     parts.append(current)
                     current = ""
-                # 변수명 추출
+                # 표현식 추출 (중괄호 중첩 지원)
                 j = i + 1
-                while j < len(template) and template[j] != '}':
+                brace_count = 1
+                while j < len(template) and brace_count > 0:
+                    if template[j] == '{':
+                        brace_count += 1
+                    elif template[j] == '}':
+                        brace_count -= 1
                     j += 1
-                var_name = template[i+1:j]
-                parts.append(Identifier(name=var_name, line=line))
-                i = j + 1
+                expr_str = template[i+1:j-1]
+
+                # 간단한 식별자인지 확인 (한글/영문/숫자/밑줄로만 구성)
+                if re.match(r'^[가-힣a-zA-Z_][가-힣a-zA-Z0-9_]*$', expr_str):
+                    # 간단한 변수명은 그대로 Identifier로
+                    parts.append(Identifier(name=expr_str, line=line))
+                else:
+                    # 복잡한 표현식은 파싱
+                    expr_tokens = [t for t in tokenize(expr_str)
+                                   if t.type not in (TokenType.NEWLINE, TokenType.EOF)]
+                    if expr_tokens:
+                        expr_tokens.append(Token(TokenType.EOF, '', line, 0))
+                        expr_parser = Parser(expr_tokens)
+                        expr = expr_parser.parse_expression()
+                        parts.append(expr)
+                i = j
             else:
                 current += template[i]
                 i += 1
@@ -627,18 +943,66 @@ class Parser:
 
         return InterpolatedString(parts=parts, line=line)
 
-    def parse_list_literal(self) -> ListLiteral:
-        """목록 리터럴"""
+    def parse_list_literal(self) -> Expression:
+        """목록 리터럴 또는 리스트 컴프리헨션"""
         token = self.advance()  # '['
         elements = []
 
         self.skip_newlines()
-        while not self.match(TokenType.RBRACKET):
-            elements.append(self.parse_expression())
-            self.skip_newlines()
-            if self.match(TokenType.COMMA):
+
+        # 빈 리스트
+        if self.match(TokenType.RBRACKET):
+            self.advance()
+            return ListLiteral(elements=[], line=token.line)
+
+        # 첫 번째 표현식 파싱
+        first_expr = self.parse_expression()
+        self.skip_newlines()
+
+        # 리스트 컴프리헨션 확인: [표현식 각각의 변수를 목록에서]
+        if self.match(TokenType.EACH):  # 각각의
+            self.advance()
+            var_name = self.expect(TokenType.IDENTIFIER, "변수 이름이 필요합니다").value
+
+            if self.match(TokenType.OBJECT):  # 를/을
                 self.advance()
+
+            # 목록 표현식 파싱 (목록에서 -> 목록 + 에서)
+            iterable = self.parse_expression()
+
+            # 에서 파티클 확인 (선택적)
+            if self.match(TokenType.FROM):  # 에서
+                self.advance()
+
+            # 필터 조건 확인: 만약 조건이면
+            condition = None
+            if self.match(TokenType.IF):  # 만약
+                self.advance()
+                condition = self.parse_expression()
+                if self.match(TokenType.THEN):  # 이면/면
+                    self.advance()
+
+            self.skip_newlines()
+            self.expect(TokenType.RBRACKET, "']'가 필요합니다")
+            return ListComprehension(
+                expression=first_expr,
+                variable=var_name,
+                iterable=iterable,
+                condition=condition,
+                line=token.line
+            )
+
+        # 일반 리스트
+        elements = [first_expr]
+        if self.match(TokenType.COMMA):
+            self.advance()
+            self.skip_newlines()
+            while not self.match(TokenType.RBRACKET):
+                elements.append(self.parse_expression())
                 self.skip_newlines()
+                if self.match(TokenType.COMMA):
+                    self.advance()
+                    self.skip_newlines()
 
         self.expect(TokenType.RBRACKET, "']'가 필요합니다")
         return ListLiteral(elements=elements, line=token.line)
@@ -808,12 +1172,26 @@ class Parser:
 
         parameters = []
         default_values = {}
+        param_types = {}
+        return_type = None
+
+        # 반환 타입 파싱: "-> 타입" 또는 ": 타입"
+        if self.match(TokenType.ARROW) or self.match(TokenType.COLON):
+            self.advance()
+            return_type = self.expect(TokenType.IDENTIFIER, "반환 타입이 필요합니다").value
 
         # 매개변수 파싱: "X와 Y를 받아" 또는 "X를 받아"
+        # 타입 힌트 지원: "X: 정수와 Y: 문자열을 받아"
         if self.match(TokenType.IDENTIFIER):
             while self.match(TokenType.IDENTIFIER):
                 param = self.advance().value
                 parameters.append(param)
+
+                # 매개변수 타입 힌트: "매개변수: 타입"
+                if self.match(TokenType.COLON):
+                    self.advance()
+                    param_type = self.expect(TokenType.IDENTIFIER, "매개변수 타입이 필요합니다").value
+                    param_types[param] = param_type
 
                 if self.match(TokenType.WITH):  # 과/와 (여러 매개변수)
                     self.advance()
@@ -825,6 +1203,18 @@ class Parser:
             if self.match(TokenType.RECEIVE):  # 받아
                 self.advance()
 
+            # 기본값 파싱: (매개변수은 값)
+            if self.match(TokenType.LPAREN):
+                self.advance()
+                while not self.match(TokenType.RPAREN):
+                    param_name = self.expect(TokenType.IDENTIFIER, "매개변수 이름이 필요합니다").value
+                    self.expect(TokenType.TOPIC_MARKER, "'은/는'이 필요합니다")
+                    default_value = self.parse_expression()
+                    default_values[param_name] = default_value
+                    if self.match(TokenType.COMMA):
+                        self.advance()
+                self.advance()  # RPAREN
+
         self.skip_newlines()
         self.expect(TokenType.INDENT, "들여쓰기가 필요합니다")
         body = self.parse_block()
@@ -833,6 +1223,8 @@ class Parser:
             name=name,
             parameters=parameters,
             default_values=default_values,
+            param_types=param_types,
+            return_type=return_type,
             body=body,
             line=start_token.line
         )
@@ -887,6 +1279,39 @@ class Parser:
             except_clauses=except_clauses,
             finally_body=finally_body,
             line=token.line
+        )
+
+    def parse_python_style_class(self) -> ClassDef:
+        """파이썬 스타일 클래스 정의: 틀 클래스명:"""
+        start_token = self.current()
+        self.advance()  # 틀
+
+        # 클래스 이름
+        name = self.expect(TokenType.IDENTIFIER, "클래스 이름이 필요합니다").value
+
+        parents = []
+        # 상속 확인: 틀 자식(부모1, 부모2):
+        if self.match(TokenType.LPAREN):
+            self.advance()
+            if not self.match(TokenType.RPAREN):
+                parents.append(self.expect(TokenType.IDENTIFIER, "부모 클래스 이름이 필요합니다").value)
+                while self.match(TokenType.COMMA):
+                    self.advance()
+                    parents.append(self.expect(TokenType.IDENTIFIER, "부모 클래스 이름이 필요합니다").value)
+            self.expect(TokenType.RPAREN, "')'가 필요합니다")
+
+        self.expect(TokenType.COLON, "':'가 필요합니다")
+        self.skip_newlines()
+        self.expect(TokenType.INDENT, "들여쓰기가 필요합니다")
+
+        body = self.parse_class_body_block()
+        # parse_class_body_block이 이미 DEDENT를 처리함
+
+        return ClassDef(
+            name=name,
+            parents=parents,
+            body=body,
+            line=start_token.line
         )
 
     def parse_class_def(self, name: str, start_token: Token) -> ClassDef:
@@ -964,6 +1389,191 @@ class Parser:
             body=body,
             init_method=init_method,
             destroy_method=destroy_method,
+            line=start_token.line
+        )
+
+    def parse_enum_def(self, name: str, start_token: Token) -> EnumDef:
+        """열거형 정의 파싱
+
+        문법:
+        색상 열거형을 정의하자
+            빨강
+            파랑
+            초록
+
+        또는 값과 함께:
+        방향 열거형을 정의하자
+            북은 0이다
+            동은 90이다
+        """
+        self.advance()  # 정의하자
+
+        self.skip_newlines()
+        self.expect(TokenType.INDENT, "들여쓰기가 필요합니다")
+
+        members = []
+        values = {}
+
+        # 열거형 본문 파싱
+        while not self.match(TokenType.DEDENT, TokenType.EOF):
+            self.skip_newlines()
+
+            if self.match(TokenType.DEDENT, TokenType.EOF):
+                break
+
+            if self.match(TokenType.IDENTIFIER):
+                member_name = self.advance().value
+
+                # 값이 있는 경우: "멤버은 값이다" 또는 "멤버는 값이다"
+                if self.match(TokenType.TOPIC_MARKER):
+                    self.advance()
+                    value = self.parse_expression()
+                    if self.match(TokenType.IS):
+                        self.advance()
+                    members.append(member_name)
+                    values[member_name] = value
+                else:
+                    # 값이 없는 경우: 멤버 이름만
+                    members.append(member_name)
+
+            self.skip_newlines()
+
+        if self.match(TokenType.DEDENT):
+            self.advance()
+
+        return EnumDef(
+            name=name,
+            members=members,
+            values=values,
+            line=start_token.line
+        )
+
+    def parse_match_statement(self, subject: Expression, start_token: Token) -> MatchStatement:
+        """패턴 매칭문 파싱
+
+        문법:
+        값을 맞춰보자
+            경우 1:
+                "하나" 를 출력하라
+            경우 2:
+                "둘" 을 출력하라
+            그외에:
+                "기타" 를 출력하라
+        """
+        self.advance()  # 맞춰보자
+
+        self.skip_newlines()
+        self.expect(TokenType.INDENT, "들여쓰기가 필요합니다")
+
+        cases = []
+
+        # 패턴 케이스 파싱
+        while not self.match(TokenType.DEDENT, TokenType.EOF):
+            self.skip_newlines()
+
+            if self.match(TokenType.DEDENT, TokenType.EOF):
+                break
+
+            # 경우 패턴:
+            if self.match(TokenType.CASE):
+                self.advance()
+                pattern = self.parse_expression()
+                self.expect(TokenType.COLON, "':'가 필요합니다")
+
+                self.skip_newlines()
+                self.expect(TokenType.INDENT, "들여쓰기가 필요합니다")
+                body = self.parse_block()
+
+                cases.append(MatchCase(
+                    pattern=pattern,
+                    body=body,
+                    is_default=False
+                ))
+
+            # 그외에: (기본 케이스)
+            elif self.match(TokenType.ELSE):
+                self.advance()
+                self.expect(TokenType.COLON, "':'가 필요합니다")
+
+                self.skip_newlines()
+                self.expect(TokenType.INDENT, "들여쓰기가 필요합니다")
+                body = self.parse_block()
+
+                cases.append(MatchCase(
+                    pattern=None,
+                    body=body,
+                    is_default=True
+                ))
+
+            else:
+                break
+
+            self.skip_newlines()
+
+        if self.match(TokenType.DEDENT):
+            self.advance()
+
+        return MatchStatement(
+            subject=subject,
+            cases=cases,
+            line=start_token.line
+        )
+
+    def parse_generator_def(self, name: str, start_token: Token) -> GeneratorDef:
+        """제너레이터 정의 파싱
+
+        문법:
+        숫자생성기 생성기를 정의하자
+            1을 내보내라
+            2를 내보내라
+            3을 내보내라
+
+        또는 매개변수와 함께:
+        범위생성기 생성기를 시작과 끝을 받아 정의하자
+            숫자는 시작이다
+            숫자 가 끝보다 작은 동안 반복하자
+                숫자를 내보내라
+                숫자 += 1
+        """
+        self.advance()  # 정의하자
+
+        parameters = []
+        default_values = {}
+
+        self.skip_newlines()
+        self.expect(TokenType.INDENT, "들여쓰기가 필요합니다")
+        body = self.parse_block()
+
+        return GeneratorDef(
+            name=name,
+            parameters=parameters,
+            default_values=default_values,
+            body=body,
+            line=start_token.line
+        )
+
+    def parse_with_statement(self, context: Expression, variable: Optional[str],
+                             start_token: Token) -> WithStatement:
+        """with 문 파싱
+
+        문법:
+        리소스를 사용하여
+            # 작업
+
+        또는 별칭과 함께:
+        리소스를 변수로 사용하여
+            # 작업
+        """
+        self.advance()  # 사용하여
+
+        self.skip_newlines()
+        self.expect(TokenType.INDENT, "들여쓰기가 필요합니다")
+        body = self.parse_block()
+
+        return WithStatement(
+            context=context,
+            variable=variable,
+            body=body,
             line=start_token.line
         )
 
@@ -1101,12 +1711,83 @@ class Parser:
 
         token = self.current()
 
+        # 파이썬 스타일 생성자: 생성(파라미터):
+        if self.match(TokenType.INIT_SHORT):
+            return self.parse_python_style_init()
+
+        # 파이썬 스타일 메서드: 방법 메서드명(파라미터):
+        if self.match(TokenType.METHOD):
+            return self.parse_python_style_method()
+
         # 부모의 생성() 패턴
         if self.match(TokenType.PARENT):  # 부모의
             return self.parse_parent_call()
 
         # 기타 문장 (자신의 포함 - parse_statement에서 처리)
         return self.parse_statement()
+
+    def parse_python_style_init(self) -> InitMethod:
+        """파이썬 스타일 생성자: 생성(파라미터):"""
+        start_token = self.current()
+        self.advance()  # 생성
+
+        # 매개변수 파싱
+        self.expect(TokenType.LPAREN, "'('가 필요합니다")
+        parameters = []
+        if not self.match(TokenType.RPAREN):
+            parameters.append(self.expect(TokenType.IDENTIFIER, "매개변수 이름이 필요합니다").value)
+            while self.match(TokenType.COMMA):
+                self.advance()
+                parameters.append(self.expect(TokenType.IDENTIFIER, "매개변수 이름이 필요합니다").value)
+        self.expect(TokenType.RPAREN, "')'가 필요합니다")
+        self.expect(TokenType.COLON, "':'가 필요합니다")
+
+        self.skip_newlines()
+        self.expect(TokenType.INDENT, "들여쓰기가 필요합니다")
+
+        body = self.parse_block()
+
+        return InitMethod(
+            parameters=parameters,
+            body=body,
+            line=start_token.line
+        )
+
+    def parse_python_style_method(self) -> MethodDef:
+        """파이썬 스타일 메서드: 방법 메서드명(파라미터):"""
+        start_token = self.current()
+        self.advance()  # 방법
+
+        # 메서드 이름
+        name = self.expect(TokenType.IDENTIFIER, "메서드 이름이 필요합니다").value
+
+        # 매개변수 파싱
+        self.expect(TokenType.LPAREN, "'('가 필요합니다")
+        parameters = []
+        default_values = {}
+        if not self.match(TokenType.RPAREN):
+            param = self.expect(TokenType.IDENTIFIER, "매개변수 이름이 필요합니다").value
+            parameters.append(param)
+            while self.match(TokenType.COMMA):
+                self.advance()
+                param = self.expect(TokenType.IDENTIFIER, "매개변수 이름이 필요합니다").value
+                parameters.append(param)
+        self.expect(TokenType.RPAREN, "')'가 필요합니다")
+        self.expect(TokenType.COLON, "':'가 필요합니다")
+
+        self.skip_newlines()
+        self.expect(TokenType.INDENT, "들여쓰기가 필요합니다")
+
+        body = self.parse_block()
+
+        return MethodDef(
+            name=name,
+            parameters=parameters,
+            default_values=default_values,
+            body=body,
+            is_static_method=False,
+            line=start_token.line
+        )
 
     def parse_self_assignment(self) -> Statement:
         """자신의 속성 할당 파싱"""
@@ -1146,6 +1827,121 @@ class Parser:
 
         return ExpressionStatement(
             expression=ParentCall(method=method_name, arguments=args, line=start_token.line),
+            line=start_token.line
+        )
+
+    def parse_decorated_function(self) -> FunctionDef:
+        """데코레이터가 있는 함수 파싱
+
+        문법:
+        @데코레이터1
+        @데코레이터2(인자)
+        함수이름을 정의하자 매개변수를 받아
+            본문
+        """
+        decorators = []
+
+        # 데코레이터들 수집
+        while self.match(TokenType.AT):
+            start_token = self.current()
+            self.advance()  # @
+
+            # 데코레이터 표현식 파싱 (식별자 또는 함수호출)
+            if not self.match(TokenType.IDENTIFIER):
+                self.error("데코레이터 이름이 필요합니다")
+
+            decorator_name = self.advance().value
+            decorator_expr = Identifier(name=decorator_name, line=start_token.line)
+
+            # 데코레이터 인자 확인
+            if self.match(TokenType.LPAREN):
+                self.advance()
+                args = []
+                while not self.match(TokenType.RPAREN):
+                    args.append(self.parse_expression())
+                    if self.match(TokenType.COMMA):
+                        self.advance()
+                self.expect(TokenType.RPAREN, "')'가 필요합니다")
+                decorator_expr = FunctionCall(
+                    function=decorator_expr,
+                    arguments=args,
+                    line=start_token.line
+                )
+
+            decorators.append(decorator_expr)
+            self.skip_newlines()
+
+        # 함수 정의 파싱
+        if not self.match(TokenType.IDENTIFIER):
+            self.error("데코레이터 다음에 함수 정의가 필요합니다")
+
+        start_token = self.current()
+        name = self.advance().value
+
+        if not self.match(TokenType.OBJECT):
+            self.error("함수 정의에 '을/를'이 필요합니다")
+        self.advance()
+
+        if not self.match(TokenType.DEFINE):
+            self.error("'정의하자'가 필요합니다")
+        self.advance()
+
+        parameters = []
+        default_values = {}
+        param_types = {}
+        return_type = None
+
+        # 반환 타입 파싱: "-> 타입" 또는 ": 타입"
+        if self.match(TokenType.ARROW) or self.match(TokenType.COLON):
+            self.advance()
+            return_type = self.expect(TokenType.IDENTIFIER, "반환 타입이 필요합니다").value
+
+        # 매개변수 파싱
+        if self.match(TokenType.IDENTIFIER):
+            while self.match(TokenType.IDENTIFIER):
+                param = self.advance().value
+                parameters.append(param)
+
+                # 매개변수 타입 힌트: "매개변수: 타입"
+                if self.match(TokenType.COLON):
+                    self.advance()
+                    param_type = self.expect(TokenType.IDENTIFIER, "매개변수 타입이 필요합니다").value
+                    param_types[param] = param_type
+
+                if self.match(TokenType.WITH):  # 과/와
+                    self.advance()
+                elif self.match(TokenType.OBJECT):  # 을/를
+                    break
+
+            if self.match(TokenType.OBJECT):
+                self.advance()
+            if self.match(TokenType.RECEIVE):  # 받아
+                self.advance()
+
+            # 기본값 파싱
+            if self.match(TokenType.LPAREN):
+                self.advance()
+                while not self.match(TokenType.RPAREN):
+                    param_name = self.expect(TokenType.IDENTIFIER, "매개변수 이름이 필요합니다").value
+                    self.expect(TokenType.TOPIC_MARKER, "'은/는'이 필요합니다")
+                    default_value = self.parse_expression()
+                    default_values[param_name] = default_value
+                    if self.match(TokenType.COMMA):
+                        self.advance()
+                self.advance()  # RPAREN
+
+        self.skip_newlines()
+        self.expect(TokenType.INDENT, "들여쓰기가 필요합니다")
+        body = self.parse_block()
+
+        return FunctionDef(
+            name=name,
+            parameters=parameters,
+            default_values=default_values,
+            param_types=param_types,
+            return_type=return_type,
+            body=body,
+            decorators=decorators,
             line=start_token.line
         )
 

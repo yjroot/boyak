@@ -74,12 +74,14 @@ class TokenType(Enum):
     LESS_EQUAL = auto()      # 작거나같다/작거나같으면
     IN = auto()              # 에 있으면
     NOT_IN = auto()          # 에 없으면
+    DIVISIBLE = auto()       # 나누어떨어지면
 
     # 조사
     SUBJECT = auto()         # 이/가
     OBJECT = auto()          # 을/를
     WITH = auto()            # 과/와
     TO = auto()              # (으)로
+    LOCATION = auto()        # 에
     POSSESSIVE = auto()      # 의 (소유격/속성 접근)
 
     # 예외 처리
@@ -94,6 +96,8 @@ class TokenType(Enum):
     # 클래스
     CLASS = auto()           # 틀
     INIT = auto()            # 생성할때
+    INIT_SHORT = auto()      # 생성 (파이썬 스타일)
+    METHOD = auto()          # 방법 (파이썬 스타일 메서드)
     DESTROY = auto()         # 소멸할때
     SELF = auto()            # 자신
     SELF_ATTR = auto()       # 자신의
@@ -117,6 +121,40 @@ class TokenType(Enum):
     MINUS_ASSIGN = auto()    # -=
     MULTIPLY_ASSIGN = auto() # *=
     DIVIDE_ASSIGN = auto()   # /=
+
+    # 비교 연산자 (기호)
+    EQ = auto()              # ==
+    NE = auto()              # !=
+    LT = auto()              # <
+    GT = auto()              # >
+    LE = auto()              # <=
+    GE = auto()              # >=
+
+    # 람다
+    ARROW = auto()           # ->
+
+    # 삼항 연산자
+    TERNARY_IF = auto()      # 일때
+    TERNARY_ELSE = auto()    # 아닐때
+
+    # 널 안전 연산자
+    OPTIONAL_CHAIN = auto()  # ?.
+    NULL_COALESCE = auto()   # ??
+
+    # 열거형
+    ENUM = auto()            # 열거형
+
+    # 패턴 매칭
+    MATCH = auto()           # 맞춰보자
+    CASE = auto()            # 경우
+    WILDCARD = auto()        # _
+
+    # 제너레이터
+    YIELD = auto()           # 내보내라
+    GENERATOR = auto()       # 생성기
+
+    # with 문
+    WITH_CONTEXT = auto()    # 사용하여/사용해서
 
     # 구분자
     LPAREN = auto()          # (
@@ -212,12 +250,18 @@ KEYWORDS = {
     '보다': TokenType.THAN,
     '크다': TokenType.GREATER,
     '크면': TokenType.GREATER,
+    '큰': TokenType.GREATER,
     '작다': TokenType.LESS,
     '작으면': TokenType.LESS,
+    '작은': TokenType.LESS,
     '크거나같다': TokenType.GREATER_EQUAL,
     '크거나같으면': TokenType.GREATER_EQUAL,
+    '크거나같고': TokenType.GREATER_EQUAL,
+    '크거나같은': TokenType.GREATER_EQUAL,
     '작거나같다': TokenType.LESS_EQUAL,
     '작거나같으면': TokenType.LESS_EQUAL,
+    '작거나같고': TokenType.LESS_EQUAL,
+    '작거나같은': TokenType.LESS_EQUAL,
 
     # 조사
     '이': TokenType.SUBJECT,
@@ -226,6 +270,14 @@ KEYWORDS = {
     '를': TokenType.OBJECT,
     '과': TokenType.WITH,
     '와': TokenType.WITH,
+    '에': TokenType.LOCATION,
+
+    # 포함 확인
+    '있으면': TokenType.IN,
+    '없으면': TokenType.NOT_IN,
+
+    # 나눗셈 검사
+    '나누어떨어지면': TokenType.DIVISIBLE,
 
     # 예외
     '시도하자': TokenType.TRY,
@@ -239,6 +291,8 @@ KEYWORDS = {
     # 클래스
     '틀': TokenType.CLASS,
     '생성할때': TokenType.INIT,
+    '생성': TokenType.INIT_SHORT,
+    '방법': TokenType.METHOD,
     '소멸할때': TokenType.DESTROY,
     '자신': TokenType.SELF,
     '자신의': TokenType.SELF_ATTR,
@@ -246,6 +300,25 @@ KEYWORDS = {
     '부모의': TokenType.PARENT,
     '틀메서드': TokenType.CLASS_METHOD,
     '정적메서드': TokenType.STATIC_METHOD,
+
+    # 삼항 연산자
+    '일때': TokenType.TERNARY_IF,
+    '아닐때': TokenType.TERNARY_ELSE,
+
+    # 열거형
+    '열거형': TokenType.ENUM,
+
+    # 패턴 매칭
+    '맞춰보자': TokenType.MATCH,
+    '경우': TokenType.CASE,
+
+    # 제너레이터
+    '내보내라': TokenType.YIELD,
+    '생성기': TokenType.GENERATOR,
+
+    # with 문
+    '사용하여': TokenType.WITH_CONTEXT,
+    '사용해서': TokenType.WITH_CONTEXT,
 }
 
 
@@ -326,14 +399,33 @@ class Lexer:
                 self._handle_number()
                 continue
 
-            # 연산자
+            # 산술 연산자
             if char in '+-*/%':
                 self._handle_operator()
+                continue
+
+            # 비교 연산자
+            if char in '=!<>':
+                self._handle_comparison()
                 continue
 
             # 구분자
             if char in '()[]{},:':
                 self._handle_delimiter()
+                continue
+
+            # 널 안전 연산자와 점
+            if char == '?':
+                start_col = self.column
+                self.advance()
+                if self.peek() == '.':
+                    self.advance()
+                    self.tokens.append(Token(TokenType.OPTIONAL_CHAIN, '?.', self.line, start_col))
+                elif self.peek() == '?':
+                    self.advance()
+                    self.tokens.append(Token(TokenType.NULL_COALESCE, '??', self.line, start_col))
+                else:
+                    self.error("'?' 뒤에는 '.' 또는 '?'가 필요합니다")
                 continue
 
             # 점 (속성 접근 또는 실수)
@@ -520,6 +612,12 @@ class Lexer:
             self.tokens.append(Token(TokenType.FLOOR_DIVIDE, '//', self.line, start_col))
             return
 
+        # 람다 화살표
+        if char == '-' and next_char == '>':
+            self.advance()
+            self.tokens.append(Token(TokenType.ARROW, '->', self.line, start_col))
+            return
+
         # 단일 연산자
         op_map = {
             '+': TokenType.PLUS,
@@ -529,6 +627,37 @@ class Lexer:
             '%': TokenType.MODULO,
         }
         self.tokens.append(Token(op_map[char], char, self.line, start_col))
+
+    def _handle_comparison(self):
+        """비교 연산자 처리"""
+        start_col = self.column
+        char = self.advance()
+        next_char = self.peek()
+
+        if char == '=':
+            if next_char == '=':
+                self.advance()
+                self.tokens.append(Token(TokenType.EQ, '==', self.line, start_col))
+            else:
+                self.error("'=' 단독 사용은 지원되지 않습니다. '=='를 사용하세요")
+        elif char == '!':
+            if next_char == '=':
+                self.advance()
+                self.tokens.append(Token(TokenType.NE, '!=', self.line, start_col))
+            else:
+                self.error("'!' 단독 사용은 지원되지 않습니다. '!='를 사용하세요")
+        elif char == '<':
+            if next_char == '=':
+                self.advance()
+                self.tokens.append(Token(TokenType.LE, '<=', self.line, start_col))
+            else:
+                self.tokens.append(Token(TokenType.LT, '<', self.line, start_col))
+        elif char == '>':
+            if next_char == '=':
+                self.advance()
+                self.tokens.append(Token(TokenType.GE, '>=', self.line, start_col))
+            else:
+                self.tokens.append(Token(TokenType.GT, '>', self.line, start_col))
 
     def _handle_delimiter(self):
         """구분자 처리"""
@@ -604,27 +733,52 @@ class Lexer:
 
                     # 조사/어미 키워드는 base로 사용하지 않음
                     # 예: "가로"를 "가"(주격조사) + "로"로 분리하지 않음
-                    particle_keywords = {'이', '가', '을', '를', '은', '는', '과', '와', '로', '으로', '의'}
+                    particle_keywords = {'이', '가', '을', '를', '은', '는', '과', '와', '로', '으로', '의', '에'}
                     if base in particle_keywords:
                         continue
 
                     # base가 키워드이면 항상 분리 (예: "틀을" -> "틀" + "을")
+                    # suffix가 의미 있는 키워드이면 항상 분리 (예: "값이다" -> "값" + "이다")
+                    # (단, 조사 키워드 이/가/은/는/을/를 등은 길이 체크 필요)
                     # base가 키워드가 아니고 너무 짧으면 분리하지 않음
                     # "이/가"는 단어 끝에 자주 오므로 base가 3자 이상일 때만 분리
                     # 예: "나이"를 "나" + "이"로 분리하지 않음
                     # 예: "고양이"를 "고양" + "이"로 분리하지 않음
                     # 다른 접미사는 base가 2자 이상일 때 분리
-                    if base not in KEYWORDS:
-                        # 이/가는 한국어 단어 끝에 자주 나오므로 더 엄격하게
+                    semantic_keywords = {'이다', '출력하라', '입력받아라', '돌려주라', '정의하자',
+                                         '반복하자', '시도하자', '가져오라', '발생시켜라'}
+                    if base not in KEYWORDS and suffix not in semantic_keywords:
+                        # 이/가는 한국어 단어 끝에 자주 나오므로 3자 이상 base 필요
+                        # 예: "새와이"를 "새와" + "이"로 분리하지 않음
                         if suffix in ('이', '가') and len(base) < 3:
                             continue
+                        # 로/으로는 한국어 단어로 끝나는 경우가 많음
+                        # 알려진 복합어 패턴 (경로, 도로, 가로 등)은 분리하지 않음
+                        if suffix in ('로', '으로'):
+                            # base가 1글자이면 분리하지 않음 (경로, 가로, 도로 등)
+                            if len(base) < 2:
+                                continue
+                            # 알려진 복합어 접미사로 끝나면 분리하지 않음
+                            compound_endings = ('경로', '도로', '가로', '세로', '통로', '진로')
+                            if any(identifier.endswith(ending) for ending in compound_endings):
+                                continue
+                        # 과/와는 한국어 단어로 끝나는 경우가 많음
+                        # 예: 결과, 효과, 성과, 학과 등
+                        if suffix in ('과', '와'):
+                            # base가 1글자이면 분리하지 않음 (결과, 효과 등)
+                            if len(base) < 2:
+                                continue
+                            # 알려진 복합어 접미사로 끝나면 분리하지 않음
+                            compound_endings_gwa = ('결과', '효과', '성과', '학과', '원과')
+                            if any(identifier.endswith(ending) for ending in compound_endings_gwa):
+                                continue
                         # 점(.) 뒤의 "이/가"는 분리하지 않음 (메서드명 보호)
                         # 예: 수학도구.사각형의넓이 -> "넓이"가 "넓"+"이"로 분리되면 안됨
                         if after_dot and suffix in ('이', '가'):
                             continue
-                        # "은/는"은 1글자 base도 허용 (예: "키는", "수는")
+                        # "은/는", "을/를", "의"는 1글자 base도 허용 (예: "키는", "수는", "값을", "합의")
                         # 다른 접미사는 base가 2자 이상이면 분리
-                        if suffix not in ('은', '는') and len(base) < 2:
+                        if suffix not in ('은', '는', '을', '를', '의') and len(base) < 2:
                             continue
 
                     if suffix in KEYWORDS:

@@ -65,6 +65,41 @@ class DictLiteral(Expression):
 
 
 @dataclass
+class TupleLiteral(Expression):
+    """튜플 리터럴"""
+    elements: List[Expression] = field(default_factory=list)
+
+
+@dataclass
+class ListComprehension(Expression):
+    """리스트 컴프리헨션: [표현식 각각의 변수를 목록에서]"""
+    expression: Expression = None
+    variable: str = ""
+    iterable: Expression = None
+    condition: Optional[Expression] = None  # 필터 조건
+
+
+@dataclass
+class SetLiteral(Expression):
+    """집합 리터럴"""
+    elements: List[Expression] = field(default_factory=list)
+
+
+@dataclass
+class OptionalChain(Expression):
+    """안전 속성 접근 (?.): 대상이 없음이면 없음 반환"""
+    target: Expression = None
+    attribute: str = ""
+
+
+@dataclass
+class NullCoalesce(Expression):
+    """널 병합 연산자 (??): 왼쪽이 없음이면 오른쪽 반환"""
+    left: Expression = None
+    right: Expression = None
+
+
+@dataclass
 class BinaryOp(Expression):
     """이항 연산"""
     operator: str = ""  # +, -, *, /, //, %, **, ==, !=, <, >, <=, >=, and, or
@@ -173,6 +208,14 @@ class Assignment(Statement):
     target: Union[Identifier, IndexAccess, AttributeAccess] = None
     value: Expression = None
     is_constant: bool = False  # 항상 키워드 사용 시
+    type_annotation: Optional[str] = None  # 타입 힌트 (예: "정수", "문자열")
+
+
+@dataclass
+class MultipleAssignment(Statement):
+    """다중 할당문 (가, 나는 1, 2이다)"""
+    targets: List[Identifier] = field(default_factory=list)
+    value: Expression = None  # TupleLiteral 또는 함수 호출
 
 
 @dataclass
@@ -270,6 +313,9 @@ class FunctionDef(Statement):
     body: List[Statement] = field(default_factory=list)
     varargs: bool = False  # 여러개받아
     kwargs: bool = False   # 이름붙여받아
+    decorators: List[Expression] = field(default_factory=list)  # 데코레이터 목록
+    param_types: dict = field(default_factory=dict)  # {매개변수: 타입} 타입 힌트
+    return_type: Optional[str] = None  # 반환 타입 힌트
 
 
 @dataclass
@@ -342,6 +388,7 @@ class MethodDef(Statement):
     body: List[Statement] = field(default_factory=list)
     is_class_method: bool = False
     is_static_method: bool = False
+    decorators: List[Expression] = field(default_factory=list)  # 데코레이터 목록
 
 
 @dataclass
@@ -368,3 +415,65 @@ class ParentCall(Expression):
     """부모 클래스 메서드 호출 (부모의 메서드())"""
     method: str = ""
     arguments: List[Expression] = field(default_factory=list)
+
+
+# ============ 열거형 관련 ============
+
+@dataclass
+class EnumDef(Statement):
+    """열거형 정의"""
+    name: str = ""
+    members: List[str] = field(default_factory=list)  # 멤버 이름들
+    values: dict = field(default_factory=dict)  # {멤버: 값} (값이 지정된 경우)
+
+
+@dataclass
+class EnumAccess(Expression):
+    """열거형 멤버 접근 (열거형.멤버)"""
+    enum_name: str = ""
+    member: str = ""
+
+
+# ============ 패턴 매칭 관련 ============
+
+@dataclass
+class MatchCase:
+    """패턴 매칭의 개별 케이스"""
+    pattern: Expression = None  # 매칭할 패턴 (None이면 와일드카드/기본)
+    guard: Optional[Expression] = None  # 조건부 패턴 (만약 조건이면)
+    body: List[Statement] = field(default_factory=list)
+    is_default: bool = False  # 그외에 (기본 케이스)
+
+
+@dataclass
+class MatchStatement(Statement):
+    """패턴 매칭문 (값을 맞춰보자)"""
+    subject: Expression = None  # 매칭할 대상
+    cases: List[MatchCase] = field(default_factory=list)
+
+
+# ============ 제너레이터 관련 ============
+
+@dataclass
+class YieldStatement(Statement):
+    """yield 문 (값을 내보내라)"""
+    value: Optional[Expression] = None
+
+
+@dataclass
+class GeneratorDef(Statement):
+    """제너레이터 정의 (생성기를 정의하자)"""
+    name: str = ""
+    parameters: List[str] = field(default_factory=list)
+    default_values: dict = field(default_factory=dict)
+    body: List[Statement] = field(default_factory=list)
+
+
+# ============ with 문 관련 ============
+
+@dataclass
+class WithStatement(Statement):
+    """with 문 (리소스를 사용하여)"""
+    context: Expression = None  # 컨텍스트 매니저 표현식
+    variable: Optional[str] = None  # as 변수 (변수로)
+    body: List[Statement] = field(default_factory=list)

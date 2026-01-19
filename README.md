@@ -318,6 +318,13 @@ boyak/
 | 파일 입출력 | ✅ |
 | 비동기 (async/await) | ❌ |
 
+## 관련 프로젝트
+
+| 프로젝트 | 설명 |
+|----------|------|
+| [뱀탕 (Baemtang)](https://github.com/yjroot/boyak-baemtang) | 보약 패키지 관리자 |
+| [히드라 (Hydra)](https://github.com/yjroot/boyak-hydra) | RPython 기반 JIT 인터프리터 |
+
 ## 라이선스
 
 MIT License
